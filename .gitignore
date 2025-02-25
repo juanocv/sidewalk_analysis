@@ -1,0 +1,8 @@
+# API
+generic/config.py
+
+# Images
+generic/images
+
+# pyCache
+generic/__pycache__
