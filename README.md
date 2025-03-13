@@ -1,7 +1,7 @@
 # Sidewalk Analysis
 
 ## Description
-Have you ever thought about why sidewalks, specially these in third-world countries, are so deficient
+Have you ever thought about why sidewalks, specially in third-world countries, are so deficient
 with little to no walkable space and plenty obstacles on the way?
 
 We have thought about it too. 
