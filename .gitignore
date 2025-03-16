@@ -15,3 +15,11 @@ build
 
 # Vscode
 .vscode
+
+# Venv
+venv 
+
+# Models configs
+generic/configs
+
+generic/output
