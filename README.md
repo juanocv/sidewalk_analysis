@@ -19,8 +19,14 @@ TDB
 ## How does it work?
 TDB
 
-## How to run
-TDB
+## Installation
+First of all you have to clone this repo via ```git clone https://github.com/juanocv/sidewalk_analysis.git```
+
+Secondly, you *must* install [detectron2](https://detectron2.readthedocs.io/en/latest/tutorials/install.html), [OneFormer](https://github.com/SHI-Labs/OneFormer/blob/main/INSTALL.md) and their respective dependencies in the same folder you have cloned this repo.
+
+Finally, you are good to go
+
+>For how to install detectron2 on Windows please check [this guide](https://dev.to/reckon762/how-to-install-detectron2-on-windows-3hil)
 
 ## Examples
 TDB
