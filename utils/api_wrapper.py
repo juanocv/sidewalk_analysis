@@ -2,6 +2,7 @@ import os, sys
 import requests
 from pathlib import Path
 
+# Nota: adicionar ao relatório essa possível necessidade caso não sete variavel PYTHONPATH
 # Add project root to Python path
 # project_root = Path(__file__).resolve().parent.parent.parent
 # sys.path.append(str(project_root))

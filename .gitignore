@@ -7,8 +7,15 @@ generic/images
 # pyCache
 generic/__pycache__
 estimation/analysis/__pycache__
-estimation/utils/__pycache__
 estimation/__pycache__
+accessibility/__pycache__
+utils/__pycache__
+
+#detectron2
+detectron2
+
+#OneFormer
+OneFormer
 
 # CMake build
 build

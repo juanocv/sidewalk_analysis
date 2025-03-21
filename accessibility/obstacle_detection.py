@@ -128,6 +128,7 @@ class SidewalkObstacleDetector:
                 continue
 
     def process_single_image(self, image_path, output_folder):
+        os.makedirs(output_folder, exist_ok=True)  # <-- ADD THIS LINE
         image = Image.open(image_path)
         inputs = self.processor(images=image, task_inputs=[
                                 "panoptic"], return_tensors="pt").to(self.device)
@@ -141,6 +142,7 @@ class SidewalkObstacleDetector:
             threshold=0.5,
             mask_threshold=0.5,
             overlap_mask_area_threshold=0.8,
+            label_ids_to_fuse=set(range(100)),
         )[0]
 
         output_path = os.path.join(
@@ -153,6 +155,7 @@ class SidewalkObstacleDetector:
         }
 
     def display_results(self, result):
+        print(f"\nAttempting to save results to: {result['output_path']}")  # <-- ADD THIS
         # Create figure
         fig = plt.figure(figsize=(24, 12))
         fig.suptitle(
@@ -193,6 +196,7 @@ class SidewalkObstacleDetector:
 
         # Save and show
         plt.savefig(result['output_path'], bbox_inches='tight')
+        print("Save completed successfully!")  # <-- ADD THIS
         plt.show()
         plt.close()
 
@@ -249,7 +253,19 @@ class SidewalkObstacleDetector:
 
 if __name__ == "__main__":
     detector = SidewalkObstacleDetector()
+    '''
     detector.process_folder(
         input_folder="/generic/images",
         output_folder="/generic/output/oneformer_ade20k_swin_large"
     )
+    '''
+    try:
+        result = detector.process_single_image(
+            image_path=os.path.abspath("generic/images/streetview_3dtest_6.jpg"),
+            output_folder=os.path.abspath("generic/output/oneformer_ade20k_swin_large")
+        )
+        detector.display_results(result)
+    except Exception as e:
+        print(f"Critical error: {str(e)}")
+        import traceback
+        traceback.print_exc()

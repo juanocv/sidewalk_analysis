@@ -1,23 +1,63 @@
 import numpy as np
 import torch
 from torchvision import transforms as T
-from PIL import Image
 
 from estimation import analysis
 from analysis import *
+from utils import *
 
-def estimate_width_m(image_path, predictor, cfg):
+from PIL import Image
+
+def largest_dense_cluster(array, gap_threshold=0.2):
+    clusters = []
+    current_cluster = [array[0]]
+
+    for i in range(1, len(array)):
+        if array[i] - array[i-1] <= gap_threshold:
+            current_cluster.append(array[i])
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [array[i]]
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    print("Formed clusters:")
+    for idx, c in enumerate(clusters):
+        print(f"Cluster {idx}: {len(c)} points, range={c[-1]-c[0]:.3f}")
+
+    largest_cluster = max(clusters, key=len)
+    return np.array(largest_cluster)
+
+def estimate_width_m(
+    image_path,
+    backend=None,  # or "detectron2" or "oneformer"
+    detectron_predictor=None,
+    detectron_cfg=None,
+    oneformer_model_name=None,
+    device="cuda"
+):
+    # Open the image (for both backends)
+    img_rgb = read_rgbimg(image_path)
+
     # Obtain sidewalk_mask, cfg and img.read
-    sidewalk_mask, img, panoptic_seg, segments_info = analysis.segment_sidewalk_mask(image_path, predictor, cfg)
+    sidewalk_mask, panoptic_seg, segments_info, detectron_cfg = segment_sidewalk_mask(
+        img_rgb,
+        backend=backend,
+        detectron_predictor=detectron_predictor,
+        detectron_cfg=detectron_cfg,
+        oneformer_model_name=oneformer_model_name,
+        device=device,
+    )
 
     # Initialize MiDaS for depth estimation
     midas = torch.hub.load("intel-isl/MiDaS", "DPT_Large")
-    midas.to(cfg.MODEL.DEVICE)
+    midas.to(device)
     midas.eval()
 
-    # 3. Estimate depth
-    img_pil = Image.open(image_path).convert("RGB")
-    original_size = img_pil.size
+    # Estimate depth
+    # img_pil = Image.open(image_path).convert("RGB")
+    #original_size = img.size
 
     # MiDaS preprocessing
     transform = T.Compose([
@@ -25,19 +65,20 @@ def estimate_width_m(image_path, predictor, cfg):
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    input_batch = transform(img_pil).unsqueeze(0).to(cfg.MODEL.DEVICE)
+    image_pil = Image.fromarray(img_rgb)
+    input_batch = transform(image_pil).unsqueeze(0).to(device)
 
     with torch.no_grad():
         depth_map = midas(input_batch)
         depth_map = torch.nn.functional.interpolate(
             depth_map.unsqueeze(1),
-            size=original_size[::-1],
+            size=(image_pil.height, image_pil.width),
             mode="bicubic",
             align_corners=False
         ).squeeze().cpu().numpy()
     
-    # 4. Calculate metrics
-    focal_length = img.shape[1] / (2 * np.tan(np.radians(70/2)))  # FOV from Street View API
+    # Calculate metrics
+    focal_length = img_rgb.shape[1] / (2 * np.tan(np.radians(75/2)))  # FOV from Street View API
 
     height, width = sidewalk_mask.shape
     bottom_frac = 0.8  # keep the bottom 20%
@@ -48,33 +89,38 @@ def estimate_width_m(image_path, predictor, cfg):
     if not np.any(mask_bottom):
         return None  # or some fallback
 
-    # Step 2) Locate sidewalk pixels
+    # Locate sidewalk pixels
     y_coords, x_coords = np.where(mask_bottom)
     if len(x_coords) == 0:
         return None  # or return some fallback
         
-    # Step 3) Get their depth
+    # Get their depth
     z_values = depth_map[y_start + y_coords, x_coords]
 
-    # Step 4) Convert to real-world X, ignoring camera Y dimension for width
+    # Convert to real-world X, ignoring camera Y dimension for width
     x_real = (x_coords - width/2) * z_values / focal_length
 
-    # Step 5) Sort and remove outliers
+    # Sort and remove outliers
     x_sorted = np.sort(x_real)
-    low_idx = int(0.02 * len(x_sorted))
-    high_idx = int(0.98 * len(x_sorted))
-    trimmed = x_sorted[low_idx:high_idx]
+    n = len(x_sorted)
+    low_idx  = int(0.02 * n)
+    high_idx = int(0.98 * n)
+    trimmed  = x_sorted[low_idx:high_idx]
 
-    width = (trimmed[-1] - trimmed[0]) / 10  # final width measure
+    stable_points = largest_dense_cluster(trimmed, gap_threshold=0.2)
+    if len(stable_points) < 2:
+        return 0.0  # or None
 
-    # Step 6) Estimate error (e.g. 25% or based on std dev)
+    width = (stable_points[-1] - stable_points[0]) / 10
+
+    # Estimate error (e.g. 25% or based on std dev)
     margin = (0.25 * width) / 10
     
     result = width, margin, sidewalk_mask, panoptic_seg, segments_info
 
     if result:
-        width, margin, sidewalk_mask, panoptic_seg, segments_info = result
-        analysis.midas_visualize(img, cfg, panoptic_seg, segments_info)
+        print(oneformer_model_name)
+        analysis.midas_visualize(img_rgb, panoptic_seg, segments_info, backend, oneformer_model_name, detectron_cfg)
         return width, margin
     else:
         raise ValueError("No sidewalk detected!")
