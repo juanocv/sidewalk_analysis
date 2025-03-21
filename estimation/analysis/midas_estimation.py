@@ -34,7 +34,9 @@ def estimate_width_m(
     backend=None,  # or "detectron2" or "oneformer"
     detectron_predictor=None,
     detectron_cfg=None,
+    detectron_label_name=None,
     oneformer_model_name=None,
+    oneformer_label_name=None,
     device="cuda"
 ):
     # Open the image (for both backends)
@@ -46,8 +48,10 @@ def estimate_width_m(
         backend=backend,
         detectron_predictor=detectron_predictor,
         detectron_cfg=detectron_cfg,
+        detectron_label_name=detectron_label_name,
         oneformer_model_name=oneformer_model_name,
-        device=device,
+        oneformer_label_name=oneformer_label_name,
+        device=device
     )
 
     # Initialize MiDaS for depth estimation

@@ -1,6 +1,6 @@
 import numpy as np
 
-def segment_with_detectron2(img_rgb, predictor, cfg):
+def segment_with_detectron2(img_rgb, predictor, cfg, label_name=None):
     from detectron2.data import MetadataCatalog
 
     # Detect sidewalk using panoptic segmentation
@@ -22,7 +22,7 @@ def segment_with_detectron2(img_rgb, predictor, cfg):
             # stuff class
             cat_name = metadata.stuff_classes[cat_id]
         # Compare to "pavement"
-        if cat_name == "pavement":
+        if cat_name == label_name:
             mask_area = (panoptic_array == seg["id"])
             sidewalk_mask[mask_area] = 1  # mark sidewalk pixels'
 
@@ -71,9 +71,9 @@ def segment_with_oneformer(
 
     return sidewalk_mask, panoptic_seg, seg_info
 
-def segment_sidewalk_mask(img_rgb, backend=None, 
-                          detectron_predictor=None, detectron_cfg=None,
-                          oneformer_model_name=None, device="cuda", label_name="sidewalk, pavement"):
+def segment_sidewalk_mask(img_rgb, backend=None, detectron_predictor=None, detectron_cfg=None, 
+                          detectron_label_name=None, oneformer_model_name=None, oneformer_label_name=None, 
+                          device="cuda"):
     """
     Returns:
       sidewalk_mask (H x W, np.uint8),
@@ -85,7 +85,7 @@ def segment_sidewalk_mask(img_rgb, backend=None,
     # 2) Depending on backend, run the corresponding code
     if backend.lower() == "detectron2":
         sidewalk_mask, segments_info, panoptic_seg = segment_with_detectron2(
-            img_rgb, detectron_predictor, detectron_cfg
+            img_rgb, detectron_predictor, detectron_cfg, detectron_label_name
         )
 
     elif backend.lower() == "oneformer":
@@ -94,7 +94,7 @@ def segment_sidewalk_mask(img_rgb, backend=None,
         oneformer_model = OneFormerForUniversalSegmentation.from_pretrained(
             oneformer_model_name).to(device)
         sidewalk_mask, panoptic_seg, segments_info = segment_with_oneformer(
-            img_rgb, oneformer_model, oneformer_processor, device, label_name
+            img_rgb, oneformer_model, oneformer_processor, device, oneformer_label_name
         )
 
     else:
