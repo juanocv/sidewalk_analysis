@@ -46,10 +46,17 @@ if __name__ == "__main__":
     # print(f"Method: MiDaS estimation\nModel: Oneformer\nDataset: ADE20k"
     #      f"\nSidewalk width ~ {sidewalk_w2:.2f} ± {margin_w2:.2f} meters\nELA: {ela:.2f}s")
 
-    # Apply method 2 (3D reconstruction with detectron2's pre-trained panoptic model)
-    # sidewalk_w3 = analysis.estimate_width_3dr(img1_path, img2_path, predictor, cfg, "detectron2", "pavement")
-    # ela = time.time() - start
-    # print(f"Method: 3D reconstruction\nModel: Detectron2\nDataset: COCO"
-    #      f"\nSidewalk width ~ {sidewalk_w3:.2f} meters\nELA: {ela:.2f}s")
+    # Apply method 2.1 (3D reconstruction with detectron2's pre-trained panoptic model)
+    sidewalk_w3 = analysis.estimate_width_3dr(img1_path, img2_path, "detectron2", predictor, cfg, "pavement")
+    ela = time.time() - start
+    print(f"Method: 3D reconstruction\nModel: Detectron2\nDataset: COCO"
+          f"\nSidewalk width ~ {sidewalk_w3:.2f} meters\nELA: {ela:.2f}s")
+
+    # Apply method 2.2 (3D reconstruction with oneformer's pre-trained panoptic model)
+    sidewalk_w3 = analysis.estimate_width_3dr(img1_path, img2_path, "oneformer", 
+    oneformer_model_name="shi-labs/oneformer_ade20k_swin_large", 
+    oneformer_label_name="sidewalk, pavement")
+    ela = time.time() - start
+    print(f"Method: 3D reconstruction\nModel: Detectron2\nDataset: ADE20k"
+          f"\nSidewalk width ~ {sidewalk_w3:.2f} meters\nELA: {ela:.2f}s")
     '''
-    

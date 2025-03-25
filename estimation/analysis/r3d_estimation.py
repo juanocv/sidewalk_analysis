@@ -217,11 +217,30 @@ def two_view_reconstruction(img1_path, img2_path, mask1, mask2):
     # Return triangulated 3D points, 
     return R, t_scaled, points_3d, inlier_points1, inlier_points2
 
-def estimate_width_3dr(img1_path, img2_path, predictor, cfg, backend=None, label=None):
+def estimate_width_3dr(img1_path, img2_path, backend=None, detectron_predictor=None, detectron_cfg=None, 
+                       detectron_label_name=None, oneformer_model_name=None, oneformer_label_name=None, device="cuda"):
     img1_rgb = read_rgbimg(img1_path)
     img2_rgb = read_rgbimg(img2_path)
-    mask1, _, _, _ = segment_sidewalk_mask(img1_rgb, backend, predictor, cfg, label)
-    mask2, _, _, _ = segment_sidewalk_mask(img2_rgb, backend, predictor, cfg, label)
+    mask1, _, _, _ = segment_sidewalk_mask(
+        img1_rgb,
+        backend=backend,
+        detectron_predictor=detectron_predictor,
+        detectron_cfg=detectron_cfg,
+        detectron_label_name=detectron_label_name,
+        oneformer_model_name=oneformer_model_name,
+        oneformer_label_name=oneformer_label_name,
+        device=device
+    )
+    mask2, _, _, _ = segment_sidewalk_mask(
+        img2_rgb,
+        backend=backend,
+        detectron_predictor=detectron_predictor,
+        detectron_cfg=detectron_cfg,
+        detectron_label_name=detectron_label_name,
+        oneformer_model_name=oneformer_model_name,
+        oneformer_label_name=oneformer_label_name,
+        device=device
+    )
     # Apply 3D Reconstruction with these two images
     R, t_scaled, points_3d, pts1_in, pts2_in = two_view_reconstruction(img1_path, img2_path, mask1, mask2)
 
