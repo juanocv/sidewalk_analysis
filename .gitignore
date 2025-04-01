@@ -2,7 +2,7 @@
 generic/config.py
 
 # Images
-generic/images
+#generic/images
 
 # pyCache
 generic/__pycache__
