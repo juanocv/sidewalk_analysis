@@ -1,0 +1,6 @@
+ID 1: "Al. da Universidade - Anchieta, São Bernardo do Campo - SP, 09606-045"
+ID 2: "R. Abolição, 53 - Vila Sao Pedro, Santo André - SP, 09210-180"
+ID 3: "R. Abolição, 340 - Vila São Pedro, Santo André - SP, 09210-180"
+ID 4: "R. Arcturus, 3 - Jardim Antares, São Bernardo do Campo - SP, 09606-070"
+ID 5: "R. Santa Adélia, 213 - Vila São Pedro, Santo André - SP, 09210-170"
+                
