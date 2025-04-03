@@ -30,3 +30,6 @@ venv
 generic/configs
 
 generic/output
+
+sidewalk-env
+venv
