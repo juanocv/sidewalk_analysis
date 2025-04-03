@@ -115,16 +115,18 @@ def estimate_width_m(
     if len(stable_points) < 2:
         return 0.0  # or None
 
-    width = (stable_points[-1] - stable_points[0]) / 10
+    computed_width = (stable_points[-1] - stable_points[0])
+
+    final_width = computed_width * 0.1 # applying manual scale factor
 
     # Estimate error (e.g. 25% or based on std dev)
-    margin = (0.25 * width) / 10
+    margin = (0.25 * final_width)
     
-    result = width, margin, sidewalk_mask, panoptic_seg, segments_info
+    result = final_width, margin, sidewalk_mask, panoptic_seg, segments_info
 
     if result:
         print(oneformer_model_name)
         analysis.midas_visualize(img_rgb, panoptic_seg, segments_info, backend, oneformer_model_name, detectron_cfg)
-        return width, margin
+        return final_width, margin
     else:
         raise ValueError("No sidewalk detected!")
