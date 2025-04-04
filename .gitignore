@@ -33,3 +33,6 @@ generic/output
 
 sidewalk-env
 venv
+
+# Environment
+environment.yml
