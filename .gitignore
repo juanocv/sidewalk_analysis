@@ -10,6 +10,7 @@ estimation/analysis/__pycache__
 estimation/__pycache__
 accessibility/__pycache__
 utils/__pycache__
+accessibility/tests/width_estimation/__pycache__
 
 #detectron2
 detectron2
@@ -36,3 +37,4 @@ venv
 
 # Environment
 environment.yml
+requirements.txt
