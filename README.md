@@ -34,8 +34,6 @@ TDB
 - Sidewalk width calculations were made using depth maps combined with segmentation masks. A custom methodology (pixel-to-meter conversion based on assumed camera parameters and MiDaS depth maps) was developed.
 ### 5. Obstacle Detection
 - A separate functionality based on segmentation results was developed to identify potential obstacles on sidewalks.
-## How does it work?
-TDB
 
 ## Installation
 First of all you have to clone this repo via ```git clone https://github.com/juanocv/sidewalk_analysis.git```
