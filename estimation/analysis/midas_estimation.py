@@ -130,3 +130,29 @@ def estimate_width_m(
         return final_width, margin
     else:
         raise ValueError("No sidewalk detected!")
+
+def get_depth_map(img_rgb, device="cuda"):
+        # Initialize MiDaS for depth estimation
+    midas = torch.hub.load("intel-isl/MiDaS", "DPT_Large")
+    midas.to(device)
+    midas.eval()
+
+    # MiDaS preprocessing
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    image_pil = Image.fromarray(img_rgb)
+    input_batch = transform(image_pil).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        depth_map = midas(input_batch)
+        depth_map = torch.nn.functional.interpolate(
+            depth_map.unsqueeze(1),
+            size=(image_pil.height, image_pil.width),
+            mode="bicubic",
+            align_corners=False
+        ).squeeze().cpu().numpy()
+    
+    return depth_map
