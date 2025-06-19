@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import matplotlib.pyplot as plt
 
 def plot_3d_point_cloud(points_3d, title="3D Point Cloud"):
@@ -59,7 +60,7 @@ def draw_horizontal_legend(ax, legend_data):
     ax.axis('off')
     ax.set_title("Segment Legend")
 
-def oneformer_visualize(img_rgb, seg_map, segments_info, model_name):
+def oneformer_visualize(output_path, img_rgb, seg_map, segments_info, model_name):
     import matplotlib.pyplot as plt
     import numpy as np
     import cv2
@@ -108,9 +109,9 @@ def oneformer_visualize(img_rgb, seg_map, segments_info, model_name):
     draw_horizontal_legend(ax_legend, legend_data)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(output_path)
 
-def detectron2_visualize(img_rgb, panoptic_seg, segments_info, cfg):
+def detectron2_visualize(output_path, img_rgb, panoptic_seg, segments_info, cfg):
     import matplotlib.pyplot as plt
     import numpy as np
     import cv2
@@ -151,9 +152,12 @@ def detectron2_visualize(img_rgb, panoptic_seg, segments_info, cfg):
     draw_horizontal_legend(ax_legend, legend_data)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(output_path)
 
-def midas_visualize(img_rgb, panoptic_seg, segments_info, backend=None, oneformer_model_name=None, cfg=None):
+def midas_visualize(img_path, img_rgb, panoptic_seg, segments_info, backend=None, oneformer_model_name=None, cfg=None):
+    # set main output file
+    output_file = os.path.splitext(os.path.basename(img_path))[0] + '.png'
+    
     if backend.lower() == "detectron2":
         #----------------------------------
         # DETECTRON2 VISUALIZATION
@@ -170,7 +174,9 @@ def midas_visualize(img_rgb, panoptic_seg, segments_info, backend=None, oneforme
         if hasattr(panoptic_seg, "cpu"):
             panoptic_seg = panoptic_seg.cpu().numpy()
 
-        detectron2_visualize(img_rgb, panoptic_seg, segments_info, cfg)
+        # specialize path for folder
+        output_path = os.path.join("estimation\output\detectron2", output_file)
+        detectron2_visualize(output_path, img_rgb, panoptic_seg, segments_info, cfg)
 
     elif backend.lower() == "oneformer":
         #----------------------------------
@@ -191,6 +197,8 @@ def midas_visualize(img_rgb, panoptic_seg, segments_info, backend=None, oneforme
             seg_map = seg_map.cpu().numpy()
         seg_map = np.array(seg_map, dtype=np.int32)
 
-        oneformer_visualize(img_rgb, seg_map, segments_info, oneformer_model_name)
+        # specialize path for folder
+        output_path = os.path.join("estimation\output\oneformer", output_file)
+        oneformer_visualize(output_path, img_rgb, seg_map, segments_info, oneformer_model_name)
     else:
         raise ValueError(f"Unsupported backend: {backend}")

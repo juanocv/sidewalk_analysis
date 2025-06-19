@@ -1,6 +1,5 @@
 import cv2
-from estimation import analysis
-from analysis import *
+from .visualization import plot_3d_point_cloud
 from utils import *
 
 def fit_plane_least_squares(points):
@@ -254,6 +253,6 @@ def estimate_width_3dr(img1_path, img2_path, backend=None, detectron_predictor=N
 
     #print("t_scaled:", t_scaled.ravel())
     #print("||t_scaled|| =", np.linalg.norm(t_scaled))
-    analysis.plot_3d_point_cloud(points_3d, title="Reconstructed Sidewalk Points")
+    plot_3d_point_cloud(points_3d, title="Reconstructed Sidewalk Points")
 
     return sidewalk_width

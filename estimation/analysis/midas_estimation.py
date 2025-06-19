@@ -1,9 +1,7 @@
 import numpy as np
 import torch
 from torchvision import transforms as T
-
-from estimation import analysis
-from analysis import *
+from .visualization import midas_visualize
 from utils import *
 
 from PIL import Image
@@ -126,7 +124,7 @@ def estimate_width_m(
 
     if result:
         print(oneformer_model_name)
-        analysis.midas_visualize(img_rgb, panoptic_seg, segments_info, backend, oneformer_model_name, detectron_cfg)
+        midas_visualize(image_path, img_rgb, panoptic_seg, segments_info, backend, oneformer_model_name, detectron_cfg)
         return final_width, margin
     else:
         raise ValueError("No sidewalk detected!")
