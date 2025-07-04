@@ -29,19 +29,27 @@ def largest_dense_cluster(array, gap_threshold=0.2):
 
 def estimate_width_m(
     image_path,
-    backend=None,  # or "detectron2" or "oneformer"
+    backend=None,  # or "detectron2", "oneformer" or "ensemble"
     detectron_predictor=None,
     detectron_cfg=None,
     detectron_label_name=None,
     oneformer_model_name=None,
     oneformer_label_name=None,
+    ensemble_model1=None,
+    ensemble_model2=None,
+    ensemble_label1=None,
+    ensemble_label2=None,
+    refine_kwargs=None,
+    apply_refine=False,
+    debug_vis=False,
+    debug_out=None,
     device="cuda"
 ):
-    # Open the image (for both backends)
+    # Open the image (for all backends)
     img_rgb = read_rgbimg(image_path)
 
     # Obtain sidewalk_mask, cfg and img.read
-    sidewalk_mask, panoptic_seg, segments_info, detectron_cfg = segment_sidewalk_mask(
+    sidewalk_mask, panoptic_seg, segments_info, detectron_cfg, ens_mask1, ens_mask2 = segment_sidewalk_mask(
         img_rgb,
         backend=backend,
         detectron_predictor=detectron_predictor,
@@ -49,6 +57,14 @@ def estimate_width_m(
         detectron_label_name=detectron_label_name,
         oneformer_model_name=oneformer_model_name,
         oneformer_label_name=oneformer_label_name,
+        ensemble_model1=ensemble_model1,
+        ensemble_model2=ensemble_model2,
+        ensemble_label1=ensemble_label1,
+        ensemble_label2=ensemble_label2,
+        apply_refine = apply_refine, 
+        refine_kwargs = refine_kwargs,
+        debug_vis = debug_vis,
+        debug_out = debug_out, 
         device=device
     )
 
@@ -83,7 +99,7 @@ def estimate_width_m(
     focal_length = img_rgb.shape[1] / (2 * np.tan(np.radians(75/2)))  # FOV from Street View API
 
     height, width = sidewalk_mask.shape
-    bottom_frac = 0.8  # keep the bottom 20%
+    bottom_frac = 0.5  # keep the bottom 20%
     y_start = int(height * bottom_frac)
 
     # Restrict to just that slice
@@ -124,7 +140,10 @@ def estimate_width_m(
 
     if result:
         print(oneformer_model_name)
-        midas_visualize(image_path, img_rgb, panoptic_seg, segments_info, backend, oneformer_model_name, detectron_cfg)
+        midas_visualize(image_path, img_rgb, panoptic_seg, segments_info,
+                        backend, oneformer_model_name, detectron_cfg,
+                        sidewalk_mask, ensemble_model1, ensemble_model2,
+                        ens_mask1, ens_mask2)        
         return final_width, margin
     else:
         raise ValueError("No sidewalk detected!")

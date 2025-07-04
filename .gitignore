@@ -1,16 +1,35 @@
 # API
+.env
 generic/config.py
 
 # Images
-#generic/images
+generic/images
+debug_out
 
 # pyCache
+.pytest_cache
 generic/__pycache__
-estimation/analysis/__pycache__
-estimation/__pycache__
-accessibility/__pycache__
-utils/__pycache__
-accessibility/tests/width_estimation/__pycache__
+prototype/estimation/analysis/__pycache__
+prototype/estimation/__pycache__
+prototype/accessibility/__pycache__
+prototype/utils/__pycache__
+prototype/accessibility/tests/width_estimation/__pycache__
+prototype/accessibility/tests/__pycache__
+prototype/estimation/tests/__pycache__
+
+sidewalk_ai/__pycache__
+sidewalk_ai/cli/__pycache__
+sidewalk_ai/core/__pycache__
+sidewalk_ai/io/__pycache__
+sidewalk_ai/models/__pycache__
+sidewalk_ai/processing/__pycache__
+sidewalk_ai/tests/__pycache__
+
+# Models
+prototype/utils/models
+
+#DeepLab
+DeepLabV3Plus-Pytorch
 
 #detectron2
 detectron2
@@ -28,12 +47,12 @@ build
 venv 
 
 # Models configs
-generic/configs
-
+generic/config.py
 generic/output
-
 sidewalk-env
-venv
+
+# Model checkpoints
+sidewalk_ai/models/checkpoints
 
 # Environment
 environment.yml

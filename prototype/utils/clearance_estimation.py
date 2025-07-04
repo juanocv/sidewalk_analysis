@@ -5,7 +5,6 @@ from utils import segment_sidewalk_and_obstacles
 from estimation.analysis.midas_estimation import get_depth_map
 
 
-
 def scale_from_ground(S, Z_raw, fx, fy, cx, cy, Hcam=2.70, N=8000, frac_good=0.08):
 
     ys, xs = np.where(S)
