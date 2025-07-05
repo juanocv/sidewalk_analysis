@@ -8,6 +8,8 @@ import numpy as np
 from pydantic import BaseModel, Field
 import sidewalk_ai as sw
 
+from fastapi.middleware.cors import CORSMiddleware
+
 # define a lifespan context manager to load once
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,6 +38,14 @@ app = FastAPI(
     version="0.1.0",
     description="Automatic sidewalk width estimation and obstacle detection.",
     lifespan=lifespan,
+)
+
+# ── add this block right after app = FastAPI(...) ──────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # or ["http://localhost"] if you prefer
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # ------------------------------------------------------------------ #
@@ -119,8 +129,10 @@ def analyse(req: AddressReq):
             mask_u8  = (res.sidewalk_mask * 255).astype("uint8")
             mask_png_b64 = _png_b64(mask_u8)
 
+            mask_bool = res.sidewalk_mask.astype(bool)
+            # create an overlay image with the sidewalk mask
             overlay = rgb_bgr.copy()
-            overlay[res.sidewalk_mask] = (0, 255, 0)
+            overlay[mask_bool] = (0, 255, 0)
             overlay = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
             overlay_png_b64 = _png_b64(overlay)
     except FileNotFoundError as e:
