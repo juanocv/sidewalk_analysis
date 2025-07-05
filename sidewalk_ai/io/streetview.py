@@ -19,7 +19,7 @@ from joblib import Memory
 class Settings(BaseSettings):
     google_api_key: str = Field(..., env="GOOGLE_API_KEY")
     cache_dir: Path = Path.home() / ".sidewalk_ai" / "cache" / "streetview"
-    default_fov: int = 120
+    default_fov: int = 90  # 0 = auto, 90 = default
     default_size: str = "600x400"
     timeout_s: int = 10
 

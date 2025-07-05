@@ -32,6 +32,7 @@ class Result:
     sidewalk_mask: np.ndarray          # H×W  uint8  (0/1)
     seg_map: np.ndarray | None = None  # panoptic id map (optional)
     img_path: Path | None = None
+    rgb_image: np.ndarray | None = None  # H×W×3  uint8 (RGB)
 
 
 # --------------------------------------------------------------------------- #
@@ -87,8 +88,14 @@ class SidewalkPipeline:
         img_path = self.sv.fetch(address)
         return self._analyse_path(img_path)
 
-    def analyse_coords(self, lat: float, lon: float, heading: int = 0) -> Result:
-        req = ImageRequest(lat, lon, heading=heading)
+    def analyse_coords(
+        self,
+        lat: float, lon: float,
+        heading: int = 0,
+        pitch:   int = 0,               # NEW
+        fov:     int = 90,              # optional, keeps default
+    ) -> Result:
+        req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
         img_path = self.sv.fetch(req)
         return self._analyse_path(img_path)
 
@@ -120,10 +127,13 @@ class SidewalkPipeline:
             depth=depth_map,
         )
 
+        self._last_rgb = img_rgb  # for debugging
+
         return Result(
             width=width_res,
             clearances=clearances,
             sidewalk_mask=sidewalk_mask,
             seg_map=seg_map,
             img_path=img_path,
+            rgb_image=img_rgb
         )
