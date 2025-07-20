@@ -7,29 +7,50 @@ from fastapi import FastAPI, HTTPException
 import numpy as np
 from pydantic import BaseModel, Field
 import sidewalk_ai as sw
+from sidewalk_ai.models.factory import build_depth 
+
+# Map ZoeDepth variant names to their canonical forms
+NAME_MAP = {
+    "ZoeD_N": "zoed_n",
+    "ZoeD_K": "zoed_k",
+    "Zoed_NK": "zoed_nk",
+    # aliases for backwards compatibility
+    "zoed_n": "zoed_n",
+    "zoed_k": "zoed_k",
+    "zoed_nk": "zoed_nk",
+}
+VALID_ZOE = ["zoed_n", "zoed_k", "zoed_nk"]
 
 from fastapi.middleware.cors import CORSMiddleware
 
 # define a lifespan context manager to load once
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic
-    app.state.seg   = sw.build_segmenter("oneformer")
-    app.state.depth = sw.MidasEstimator()
-    app.state.sv    = sw.StreetViewClient()
+    seg = sw.build_segmenter("oneformer")       # reused by every pipe
+    sv  = sw.StreetViewClient()
+    app.state.sv = sv
 
-    app.state.pipe_refine_true  = sw.SidewalkPipeline(
-        segmenter=app.state.seg,
-        depth     =app.state.depth,
-        streetview=app.state.sv,
-        refine    =True,
+    # ---- depth back-ends ------------------------------------------------
+    depth_midas = build_depth("midas")
+    depth_zoe   = build_depth(
+    "zoe",
+    variant=NAME_MAP.get(
+        os.getenv("SWAI_ZOE_VARIANT", "zoed_n"), "zoed_n"
+    ),
     )
-    app.state.pipe_refine_false = sw.SidewalkPipeline(
-        segmenter=app.state.seg,
-        depth     =app.state.depth,
-        streetview=app.state.sv,
-        refine    =False,
-    )
+
+    # ---- build four pipelines (depth × refine) -------------------------
+    def _make(depth_obj, refine: bool):
+        return sw.SidewalkPipeline(
+            segmenter=seg, depth=depth_obj, streetview=sv, refine=refine
+        )
+
+    app.state.pipes = {
+        ("midas", True):  _make(depth_midas, True),
+        ("midas", False): _make(depth_midas, False),
+        ("zoe",   True):  _make(depth_zoe,   True),
+        ("zoe",   False): _make(depth_zoe,   False),
+    }
     yield
     # (Optional) Shutdown logic here
 
@@ -65,6 +86,20 @@ class AddressReq(BaseModel):
     pitch:   int = Field(0,  ge=-90, le=90)
     fov:     int = Field(90, ge=10,  le=120)
 
+# ─── depth selection ──────────────────────────────────────────
+    depth: str = Field(
+        default=os.getenv("SWAI_DEPTH", "midas"),
+        pattern="^(midas|zoe)$",
+        description="'midas' (default) or 'zoe'",
+        example="midas",    
+    )
+    zoe_variant: str | None = Field(
+        default=None,
+        description="Override ZoeDepth variant (ZoeD_N, ZoeD_K, ZoeD_NK) "
+                    "if depth='zoe'. Ignored otherwise.",
+        example="ZoeD_N",
+    )
+
 # ─── geometry refinement knobs ────────────────────────────────
     refine: bool = True
     force_fallback: bool  = True
@@ -88,9 +123,28 @@ def _png_b64(arr: np.ndarray) -> str:
 # shared helper – runs the pipeline exactly once                     #
 # ------------------------------------------------------------------ #
 def _run_pipeline(req: "AddressReq") -> sw.core.pipeline.Result:
-    pipe = (app.state.pipe_refine_true
-            if req.refine else
-            app.state.pipe_refine_false)
+    # pick the pre-built pipeline
+    key = (req.depth, req.refine)
+    if key not in app.state.pipes:
+        raise HTTPException(400, f"Depth backend '{req.depth}' not available")
+    pipe = app.state.pipes[key]
+ 
+    # optional on-the-fly Zoe variant override
+    if req.depth == "zoe" and req.zoe_variant:
+        # build once then cache in the dict
+        v = NAME_MAP.get(req.zoe_variant, None)
+        if v is None:
+            raise HTTPException(400, "zoe_variant must be one of "
+                                       f"{', '.join(VALID_ZOE)}")
+        depth_obj = build_depth("zoe", variant=v)
+        app.state.pipes[key] = sw.SidewalkPipeline(
+            segmenter=pipe.segmenter,
+            depth=depth_obj,
+            streetview=app.state.sv,      
+            refine=req.refine,
+        )
+        pipe = app.state.pipes[key]
+
         
     # expose fallback knobs to refinement code
     if req.fallback_scale is not None:

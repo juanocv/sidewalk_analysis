@@ -117,6 +117,8 @@ class SidewalkPipeline:
 
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
+        metric = getattr(self.depth_est, "is_metric", False)
+        width_res = compute_width(sidewalk_mask, depth_map, metric_depth=metric)
 
         # -------- Geometry --------------------------------------------- #
         width_res = compute_width(sidewalk_mask, depth_map)
@@ -125,6 +127,7 @@ class SidewalkPipeline:
             sidewalk_mask,
             obstacles=[],            # supply obstacle masks here when ready
             depth=depth_map,
+            metric_depth=metric 
         )
 
         self._last_rgb = img_rgb  # for debugging

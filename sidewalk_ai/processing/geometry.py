@@ -109,6 +109,8 @@ def _largest_dense_cluster(
 def compute_width(
     sidewalk:      np.ndarray,          # bool mask (H×W)
     depth:         np.ndarray,          # float32 depth map (H×W)
+    *,                                  # ← force keyword-only below
+    metric_depth:  bool = False,        # ← NEW (True for ZoeDepth)
     FOV_deg:       float = 75.0,        # empirical optimum
     band_frac:     tuple[float, float] = (0.50, 1.00),  # lower 50 % of the image
     trim_pct:      float = 2.0,         # outlier trim for density cluster
@@ -129,17 +131,16 @@ def compute_width(
 
     Z = depth[y0 + ys, xs]
 
-    # --- convert MiDaS depth to metres via ground-plane scale -------------
+    # 1) ensure depth is in metres  ────────────────────────────────────
     fx = W / (2.0 * np.tan(np.radians(FOV_deg / 2)))
     fy = fx
     cx = W / 2
     cy = H / 2
-    alpha = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
-    # --- fallback if plane-fit failed (alpha ≈ 1.0) -----------------
-    if os.getenv("SWAI_FORCE_FALLBACK") == "1":
-        alpha = float(os.getenv("SWAI_FALLBACK_SCALE", "0.075"))
-
-    Z = Z * alpha                # depth now expressed in metres
+    if not metric_depth:
+        alpha = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
+        if os.getenv("SWAI_FORCE_FALLBACK") == "1":
+            alpha = float(os.getenv("SWAI_FALLBACK_SCALE", "0.075"))
+        Z = Z * alpha
 
     # 2) pin-hole intrinsics from FOV (reuse fx computed above)
     X = (xs - W / 2) * Z / fx
@@ -161,6 +162,8 @@ def compute_clearances(
     sidewalk:   np.ndarray,                 # bool H×W
     obstacles:  Sequence[tuple[str, np.ndarray]],   # (label, bool-mask)
     depth:      np.ndarray,
+    *,                                  # ← force keyword-only below
+    metric_depth:  bool = False,        # ← NEW (True for ZoeDepth)
     FOV_deg:    float = 70.0,
     h_up_px:    int = 12,
     contact_gap: int = 25,

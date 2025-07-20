@@ -26,3 +26,15 @@ class Segmenter(Protocol):
         device: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None, list[SegmentInfo] | None]:
         ...
+
+class DepthEstimator(Protocol):
+    """
+    Common behaviour for depth back-ends.
+
+    `is_metric`
+        *True*  -> returned depth is already in **metres** (ZoeDepth).  
+        *False* -> needs ground-plane scaling (MiDaS, etc.).
+    """
+    is_metric: bool = False
+
+    def predict(self, img_rgb: np.ndarray) -> np.ndarray: ...

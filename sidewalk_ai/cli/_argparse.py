@@ -18,6 +18,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deeplab-model", default="deeplabv3plus_resnet101",
                         help="Model ctor name inside your network.modeling "
                             "(e.g. deeplabv3plus_mobilenetv3_large)")
+    parser.add_argument("--depth", default="midas", choices=["midas", "zoe"])
+    parser.add_argument("--zoe-variant",
+                    default="zoed_n",
+                    choices=["zoed_n","zoed_k","zoed_nk"],
+                    help="ZoeDepth model size")    
     parser.add_argument("--force-fallback", action="store_true",
                         help="Ignore ground-plane fit; always use fallback scale")
     parser.add_argument("--fallback-scale", type=float, default=0.075,

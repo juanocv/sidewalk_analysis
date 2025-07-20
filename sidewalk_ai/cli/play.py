@@ -18,6 +18,7 @@ from sidewalk_ai.cli._builder import build_segmenter
 from sidewalk_ai.cli._debug_viz import write_debug_sheet
 from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.cli._argparse import build_parser
+from sidewalk_ai.models.factory import build_depth 
 
 
 # ───────────────────────── CLI args ────────────────────────────────
@@ -40,7 +41,7 @@ segmenter = build_segmenter(args.seg, ckpt=args.ckpt,
                             dl_model=args.deeplab_model,
                             device=args.device,
                             method=args.ensemble_method)
-depth      = sw.MidasEstimator(device=args.device)
+depth = build_depth(args.depth, variant=args.zoe_variant, device=args.device)
 streetview = sw.StreetViewClient()
 pipe       = sw.SidewalkPipeline(segmenter=segmenter,
                                  depth=depth,

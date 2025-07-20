@@ -1,5 +1,5 @@
 from __future__ import annotations
-import cv2, numpy as np, os, torch
+import cv2, numpy as np, torch
 from pathlib import Path
 from ._builder import LABEL_MAP
 from detectron2.data.catalog import MetadataCatalog
@@ -19,6 +19,27 @@ def overlay_mask(img, mask, color=(0,255,0), alpha=0.4):
     ovl = img.copy()
     ovl[mask] = color
     return cv2.addWeighted(ovl, alpha, img, 1-alpha, 0)
+
+def get_depth_model_name(depth_estimator):
+    """Get the correct depth model name for display"""
+    if hasattr(depth_estimator, '__class__'):
+        class_name = depth_estimator.__class__.__name__
+        if 'Zoe' in class_name or 'ZoeDepth' in class_name:
+            # Check if it has variant info
+            if hasattr(depth_estimator, 'model') and hasattr(depth_estimator.model, 'core'):
+                # Try to get the variant from the model architecture
+                variant = getattr(depth_estimator, '_variant', 'unknown')
+                if variant != 'unknown':
+                    return f"ZoeDepth-{variant.upper()}"
+                return "ZoeDepth"
+            elif hasattr(depth_estimator, '_variant'):
+                return f"ZoeDepth-{depth_estimator._variant.upper()}"
+            return "ZoeDepth"
+        elif 'Midas' in class_name or 'MiDaS' in class_name:
+            return "MiDaS"
+        else:
+            return class_name
+    return "Unknown"
 
 def get_segment_info_for_debug(segmenter, img_rgb):
     """Get segmentation info for debug visualization - matches original logic"""
@@ -281,10 +302,11 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                                             cv2.COLOR_GRAY2BGR),
                             "Sidewalk (refined mask only)"))
 
-    # 3 depth
+    # 3 depth - FIX: Use correct depth model name
     depth = pipeline.depth_est.predict(img_rgb)
     vis=((depth-depth.min())/(depth.ptp()+1e-6)*255).astype(np.uint8)
-    tiles.append(add_title(cv2.applyColorMap(vis,cv2.COLORMAP_INFERNO),"Depth (MiDaS)"))
+    depth_model_name = get_depth_model_name(pipeline.depth_est)
+    tiles.append(add_title(cv2.applyColorMap(vis,cv2.COLORMAP_INFERNO),f"Depth ({depth_model_name})"))
     
     # grid + header/footer
     tile_h, tile_w = tiles[0].shape[:2]
@@ -300,7 +322,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- HEADER ------------------------------------------------
     hdr_h = 40
     header = np.full((hdr_h, grid.shape[1], 3), 30, np.uint8)
-    text = f"{args.image.name}   |   seg={args.seg}   |   depth=MiDaS"
+    text = f"{args.image.name}   |   seg={args.seg}   |   depth={depth_model_name}"
     cv2.putText(header, text, (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
     
@@ -317,5 +339,5 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- COMPOSE ----------------------------------------------
     composite = np.vstack([header, grid, footer])
 
-    cv2.imwrite(str(outdir/f"{args.image.stem}_{args.seg.replace('+', '_')}_midas.png"),
+    cv2.imwrite(str(outdir/f"{args.image.stem}_{args.seg.replace('+', '_')}_{depth_model_name.lower().replace('-', '_')}.png"),
                 cv2.cvtColor(composite,cv2.COLOR_RGB2BGR))
