@@ -7,6 +7,9 @@ from typing import Iterable, Sequence
 import cv2, os
 import numpy as np
 
+ORIG_SIZE = (600, 400)      # Street-View static API
+CROP_BOTTOM = 20            # logo strip that we remove
+CAM_HEIGHT_M = 1.75
 
 # --------------------------------------------------------------------------- #
 # 0) Typed results – easy to validate/serialize
@@ -31,55 +34,62 @@ class ClearanceResult:
 # 1)  Core helpers -- largely ported from the research prototype
 # --------------------------------------------------------------------------- #
 
+def project_line_to_ground(m, b, fx, fy, cx, cy, pitch_deg=0.0):
+    """
+    Converte y = m·x + b  (px) para   Z = a·X + c  (m) no plano do solo.
+    """
+    # Gere ~50 pontos ao longo da linha na imagem
+    xs = np.linspace(0, ORIG_SIZE[0]-1, 50)
+    ys = m * xs + b
+    X, Z = _ground_intersection(xs, ys, fx, fy, cx, cy, pitch_deg)
+    good = np.isfinite(X) & np.isfinite(Z)
+    if good.sum() < 10:
+        raise RuntimeError("curb line proj. failed")
+    # Ajuste Z = a·X + c em coordenadas do solo
+    a, c = np.polyfit(X[good], Z[good], 1)
+    return a, c            # forma   Z = a·X + c
+
+
 def _scale_from_ground(
-    sidewalk: np.ndarray,
-    depth:    np.ndarray,
-    fx: float, fy: float, cx: float, cy: float,
-    H_cam: float = 2.70,
-    RANSAC_N: int = 8_000,
-    frac_good: float = 0.08,
+    sidewalk, depth, fx, fy, cx, cy,
+    H_cam=CAM_HEIGHT_M, rows_from_bottom=20,
+    RANSAC_N=10_000, min_inliers=200
 ) -> float:
-    """
-    Fit a plane through random sidewalk pixels via RANSAC and
-    derive an *α* scale factor that converts pixel units into metres.
+    """α robusto ─ usa só as últimas `rows_from_bottom` linhas da calçada."""
+    H, _ = sidewalk.shape
+    band = np.arange(max(0, H - rows_from_bottom), H)
+    ys, xs = np.where(sidewalk[band])
+    if xs.size < min_inliers:
+        return 1.0                                   # deixa passar em branco
 
-    Ported – with small clean-ups – from `scale_from_ground` :contentReference[oaicite:0]{index=0}.
-    """
-    ys, xs = np.where(sidewalk)
-    if xs.size < 50:               # not enough data
-        return 1.0
-
-    rng  = np.random.default_rng(0)
-    sel  = rng.choice(xs.size, size=min(RANSAC_N, xs.size), replace=False)
+    ys = ys + band[0]                               # re-alinha índice
+    rng = np.random.default_rng(0)
+    sel = rng.choice(xs.size, size=min(RANSAC_N, xs.size), replace=False)
     u, v = xs[sel], ys[sel]
-    Zr   = depth[v, u].astype(np.float32)
+    Zr = depth[v, u].astype(np.float32)
 
     Xr = (u - cx) * Zr / fx
     Yr = (v - cy) * Zr / fy
     P  = np.column_stack([Xr, Yr, Zr])
 
-    # robust distance threshold = 1 % of IQR
-    iqr = np.subtract(*np.percentile(Zr, [75, 25]))
-    eps = 0.01 * iqr if iqr > 1e-3 else 0.005
+    # threshold = 2·MAD
+    mad = 1.4826 * np.median(np.abs(Zr - np.median(Zr)))
+    eps = 2.0 * max(mad, 0.01)
 
     best_cnt = 0
     best_d   = 1.0
-
-    for _ in range(1_500):
+    for _ in range(2000):
         a, b, c = P[rng.choice(P.shape[0], 3, replace=False)]
-        n   = np.cross(b - a, c - a)
-        n_norm = np.linalg.norm(n)
-        if n_norm < 1e-6:
-            continue
-        n /= n_norm
-        d  = -np.dot(n, a)
+        n = np.cross(b - a, c - a); n_norm = np.linalg.norm(n)
+        if n_norm < 1e-6: continue
+        n /= n_norm; d = -np.dot(n, a)
         cnt = np.count_nonzero(np.abs(P @ n + d) < eps)
-
         if cnt > best_cnt:
             best_cnt, best_d = cnt, d
-            if cnt > frac_good * P.shape[0]:
-                break
+            if cnt > 0.15 * P.shape[0]: break
 
+    if best_cnt < min_inliers:                       # falhou → neutro
+        return 1.0
     return abs(H_cam / best_d)
 
 
@@ -102,60 +112,133 @@ def _largest_dense_cluster(
     return np.array(max(clusters, key=len))
 
 
+def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0,
+                         H_cam=CAM_HEIGHT_M):
+    """
+    Vectorised ray–plane intersection for pixels below the horizon.
+    """
+    # shift the horizon by camera pitch
+    v_h = cy - fy * np.tan(np.radians(pitch_deg))
+    denom = (v - v_h).astype(np.float32)
+    valid = denom > 1.0
+    Z = np.full_like(denom, np.nan, np.float32)
+    X = np.full_like(denom, np.nan, np.float32)
+    Z[valid] = H_cam * fy / denom[valid]
+    X[valid] = (u[valid] - cx) * Z[valid] / fx
+    return X, Z
+
+
+def _intrinsics_after_crop(W: int = 600, H_crop: int = 380,
+                           crop_bottom: int = 20, fov_deg: float = 75.0) -> tuple[float, float, float, float]:
+    """
+    Returns fx, fy, cx, cy *in cropped coordinates* but referenced to the
+    original optical centre (cy = 200 px).
+    """
+    fx = W / (2 * np.tan(np.radians(fov_deg / 2)))
+    fy = fx
+    cx = W / 2
+    cy_orig = ORIG_SIZE[1] / 2                      # 200.0
+    cy = cy_orig                                   # same row survives the crop
+    return fx, fy, cx, cy
+
+
+def _has_two_curbs(mask: np.ndarray, min_gap_px=50) -> bool:
+    """
+    Returns True when the mask shows *two* distinct sidewalk regions
+    separated by at least `min_gap_px` columns → likely a parallel view.
+    """
+    cols = np.unique(np.where(mask)[1])
+    if cols.size == 0:         # nothing detected
+        return False
+    split = np.where(np.diff(np.sort(cols)) > min_gap_px)[0]
+    return split.size >= 1
+
 # --------------------------------------------------------------------------- #
 # 2)  Public API – what the pipeline will call
 # --------------------------------------------------------------------------- #
 
 def compute_width(
     sidewalk:      np.ndarray,          # bool mask (H×W)
-    depth:         np.ndarray,          # float32 depth map (H×W)
-    *,                                  # ← force keyword-only below
-    metric_depth:  bool = False,        # ← NEW (True for ZoeDepth)
-    FOV_deg:       float = 75.0,        # empirical optimum
-    band_frac:     tuple[float, float] = (0.50, 1.00),  # lower 50 % of the image
-    trim_pct:      float = 2.0,         # outlier trim for density cluster
-    err_pct:       float = 25.0,        # propagated error %
+    depth:         np.ndarray | None = None,
+    *,                                  # keyword-only
+    pitch_deg:     float = -10.0,
+    #metric_depth:  bool = False,
+    #use_geom:      bool = True,
+    skip_if_dual:  bool = True,
+    FOV_deg:       float = 75.0,
+    band_frac:     tuple[float, float] = (0.50, 1.00),
+    #trim_pct:      float = 2.0,
+    err_pct:       float = 25.0,
 ) -> WidthResult:
-    """
-    Replicates the geometric steps from Section 4.4 of the paper while
-    staying side-effect-free.  All parameters are overridable for experiments.
-    """
+
     H, W = sidewalk.shape
     y0 = int(H * band_frac[0])
     y1 = int(H * band_frac[1])
 
-    # 1) pixels we trust for width
+    # 0) intrínsecos já no começo ──────────────────────────────────────
+    fx, fy, cx, cy = _intrinsics_after_crop(W, H, CROP_BOTTOM, FOV_deg)
+
+    # 1) horizonte real → garante banda abaixo dele
+    v_h = cy - fy * np.tan(np.radians(pitch_deg))
+    y0  = max(y0, int(v_h + 5))
+    if y0 >= y1 - 5:
+        return WidthResult(0.0, 0.0, 0)
+
+    # 2) descarta cena com duas calçadas paralelas → deixa p/ Estágio A
+    if skip_if_dual and _has_two_curbs(sidewalk):
+        return WidthResult(0.0, 0.0, 0)
+
+    # 3) pixels candidatos
     ys, xs = np.where(sidewalk[y0:y1])
     if xs.size < 20:
         return WidthResult(0.0, 0.0, 0)
 
-    Z = depth[y0 + ys, xs]
+    # 4) medida por fileira – primeiro px da calçada em cada lado
+    widths = []
+    v_ref   = np.arange(y0, y1)
+    α = 1.0
+    if depth is not None:
+        α = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)  # usa o novo
 
-    # 1) ensure depth is in metres  ────────────────────────────────────
-    fx = W / (2.0 * np.tan(np.radians(FOV_deg / 2)))
-    fy = fx
-    cx = W / 2
-    cy = H / 2
-    if not metric_depth:
-        alpha = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
-        if os.getenv("SWAI_FORCE_FALLBACK") == "1":
-            alpha = float(os.getenv("SWAI_FALLBACK_SCALE", "0.075"))
-        Z = Z * alpha
+    for v in v_ref:
+        cols = np.where(sidewalk[v])[0]
+        if cols.size < 2:      # calçada não visível nesta linha
+            continue
 
-    # 2) pin-hole intrinsics from FOV (reuse fx computed above)
-    X = (xs - W / 2) * Z / fx
+        uL, uR = cols[0], cols[-1]
+        ZL = (depth[v, uL] * α) if depth is not None else None
+        ZR = (depth[v, uR] * α) if depth is not None else None
 
-    # 3) trim outliers and keep densest cluster
-    lo, hi = np.percentile(X, [trim_pct, 100 - trim_pct])
-    X_in   = X[(X >= lo) & (X <= hi)]
-    stable = _largest_dense_cluster(np.sort(X_in))
+        # se não temos depth confiável, cai para intersecção geométrica
+        if ZL is None or ZR is None or ZL <= 0 or ZR <= 0:
+            XL, ZL = _ground_intersection(uL, v, fx, fy, cx, cy, pitch_deg)
+            XR, ZR = _ground_intersection(uR, v, fx, fy, cx, cy, pitch_deg)
+        else:
+            XL = (uL - cx) * ZL / fx
+            XR = (uR - cx) * ZR / fx
 
-    if stable.size < 2:
+        if not np.isfinite(XL) or not np.isfinite(XR):
+            continue
+        widths.append(abs(XR - XL))
+
+    if len(widths) < 5:
         return WidthResult(0.0, 0.0, 0)
 
-    width = stable[-1] - stable[0]
-    margin = err_pct / 100.0 * width
-    return WidthResult(width, margin, int(stable.size))
+    widths = np.array(widths)
+    width  = float(np.median(widths))
+    margin = err_pct / 100 * width
+
+    # print(dict(
+    # y0=y0, y1=y1,
+    # width=width, margin=margin,
+    # v_h=v_h,
+    # finite= np.isfinite(width),
+    # band_Z= (α * depth[y0:y1].mean()) if depth is not None else None,
+    # chosen_band=(y0, y1),
+    # n_pixels=len(widths),
+    # ))
+    
+    return WidthResult(width, margin, len(widths))
 
 
 def compute_clearances(
@@ -197,10 +280,41 @@ def compute_clearances(
         )
     return results or [ClearanceResult("none", -1.0, -1.0, -1.0)]
 
-
 # --------------------------------------------------------------------------- #
 # 3)  Internal helpers (kept private)
 # --------------------------------------------------------------------------- #
+
+def compute_width_from_curbs(
+    mask: np.ndarray,
+    top: tuple[float, float],
+    bot: tuple[float, float],
+    *,
+    pitch_deg: float = -10.0,
+    FOV_deg:  float = 75.0,
+) -> WidthResult:
+    """Mede a largura da calçada a partir das guias já refinadas."""
+    H, W = mask.shape
+    fx, fy, cx, cy = _intrinsics_after_crop(W, H, CROP_BOTTOM, FOV_deg)
+
+    try:
+        a1, c1 = project_line_to_ground(*top, fx, fy, cx, cy, pitch_deg)
+        a2, c2 = project_line_to_ground(*bot, fx, fy, cx, cy, pitch_deg)
+    except RuntimeError:
+        # projeção falhou (linha acima do horizonte, etc.)
+        return WidthResult(0.0, 0.0, 0)
+
+    width  = ortho_distance(a1, c1, a2, c2)
+    margin = 0.10 * width
+    return WidthResult(width, margin, int(mask.sum()))
+
+
+def ortho_distance(a1,c1, a2,c2):
+    """
+    w = |c2 - c1| / sqrt(1 + a^2)   (a1≈a2→use média)
+    """
+    a = 0.5*(a1 + a2)
+    return abs(c2 - c1) / np.sqrt(1 + a*a)
+
 
 def _contact_band(S: np.ndarray, O: np.ndarray,
                   h_up: int, max_gap: int) -> np.ndarray | None:
@@ -220,6 +334,37 @@ def _contact_band(S: np.ndarray, O: np.ndarray,
                 break
     return band if band.any() else None
 
+
+def _safe_col_at_row(m_img, b_img, row, *, mask_row, side, W):
+    """
+    Devolve a coluna (int) que melhor representa a guia no 'row':
+    1. Calcula u0 = intersecção reta × linha.
+    2. Se u0 está dentro do quadro e mask_row[u0]==1 → OK.
+    3. Caso contrário, procura o pixel 1 mais próximo **dentro do quadro**
+       caminhando para dentro (→ se 'side' == "right", ← se "left").
+       Se não encontrar, devolve None.
+    """
+    if abs(m_img) < 1e-6:                    # reta horizontal → faz skip
+        return None
+
+    u0 = int(round((row - b_img) / m_img))
+    u0 = np.clip(u0, 0, W - 1)               # ainda dentro dos limites
+
+    if mask_row[u0]:                         # bateu direto na calçada
+        return u0
+
+    if side == "left":
+        # anda para a direita até achar um pixel 1
+        for u in range(u0 + 1, W):
+            if mask_row[u]:
+                return u
+    else:  # "right"
+        # anda para a esquerda
+        for u in range(u0 - 1, -1, -1):
+            if mask_row[u]:
+                return u
+    return None                              # nada encontrado
+    
 
 def _px_clearance(S: np.ndarray, band: np.ndarray) -> tuple[int, int, int] | None:
     """

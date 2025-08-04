@@ -179,6 +179,7 @@ def fill_between_independent_lines(
     min_cols: int = 20,
     ransac_thresh: float = 3.0,
     ransac_trials: int = 100,
+    return_lines: bool = False,
 ) -> np.ndarray:
     """
     1. Extract visible top & bottom edges per **column**;
@@ -220,7 +221,14 @@ def fill_between_independent_lines(
 
     fill = np.zeros_like(mask, dtype=np.uint8)
     cv2.fillPoly(fill, [pts], 1)
-    return fill
+    # opcional: se quiser preservar a máscara original, troque por
+    # filled = np.maximum(mask.astype(np.uint8), fill)
+    filled = fill
+
+    # (m, b) no sistema imagem:  y = m·x + b
+    lines = ((m_top, b_top), (m_bot, b_bot))
+    return (filled, lines) if return_lines else filled
+
 
 
 # --------------------------------------------------------------------------- #
@@ -284,11 +292,12 @@ def refine_sidewalk_mask(
             keep[lbl == i] = 1
 
     # 5) two-line infill (parallel curbs)
-    final = fill_between_independent_lines(
+    mask, (top_line, bot_line) = fill_between_independent_lines(
         keep,
         **(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200)),
+        return_lines=True,
     )
-    return final
+    return mask, top_line, bot_line
 
 
 # --------------------------------------------------------------------------- #

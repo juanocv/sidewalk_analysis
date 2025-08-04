@@ -15,6 +15,7 @@ from sidewalk_ai.processing.geometry import (
      ClearanceResult,
      compute_width,
      compute_clearances,
+     compute_width_from_curbs,
  )
 from sidewalk_ai.processing.fusion import logical_fuse
 from sidewalk_ai.models.base import Segmenter
@@ -113,15 +114,30 @@ class SidewalkPipeline:
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
         if self.refine:
-            sidewalk_mask = refine_sidewalk_mask(sidewalk_mask)
+            sidewalk_mask, edge_top, edge_bot = refine_sidewalk_mask(sidewalk_mask)
 
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
         metric = getattr(self.depth_est, "is_metric", False)
-        width_res = compute_width(sidewalk_mask, depth_map, metric_depth=metric)
-
-        # -------- Geometry --------------------------------------------- #
+        #print(f"Depth map shape: {depth_map.shape}, metric={metric}")
+        #use_geom = getattr(self.depth_est, "use_geometry", False)
         width_res = compute_width(sidewalk_mask, depth_map)
+        #width_res_1 = compute_width(sidewalk_mask, depth_map, metric_depth=metric, use_geom=True)
+        #width_res_2 = compute_width(sidewalk_mask, depth_map, metric_depth=metric, use_geom=False)
+        #width_res_3 = compute_width_from_curbs(sidewalk_mask, edge_top, edge_bot)
+        #print(
+        #    f"Width results:\n"
+        #    f"compute_width={width_res_1.width_m:.2f}m (Use_geom = True);\n"
+        #    f"compute_width={width_res_2.width_m:.2f}m (Use_geom = False);\n"
+        #    f"compute_width_from_curbs={width_res_3.width_m:.2f}m"
+        #)
+        #if width_res_2.width_m < width_res_1.width_m and width_res_2.width_m < width_res_3.width_m:
+        #    width_res = width_res_2
+        #elif width_res_3.width_m < width_res_1.width_m and width_res_3.width_m < width_res_2.width_m:
+        #    width_res = width_res_3
+        #else:
+        #    width_res = width_res_1
+        # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
         clearances = compute_clearances(
             sidewalk_mask,
