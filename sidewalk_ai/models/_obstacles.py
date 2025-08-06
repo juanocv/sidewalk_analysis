@@ -17,7 +17,7 @@ IGNORE_LABELS   = {
 MIN_INST_AREA_PX   = 30          # reject very tiny noise blobs
 MAX_INST_FRAC      = 0.50        # reject background-size regions
 MIN_OVERLAP_PX     = 10          # at least this many pixels on sidewalk
-MIN_OVERLAP_RATIO  = 0.01        # ≥ 10 % of the instance must sit on sidewalk
+MIN_OVERLAP_RATIO  = 0.01        # ≥ 1 % of the instance must sit on sidewalk
 
 
 def extract_obstacles(
