@@ -1,9 +1,11 @@
 # sidewalk_ai/models/deeplab.py
 from __future__ import annotations
 import numpy as np
-import torch
+import torch, cv2
 from torchvision import transforms
 from PIL import Image
+
+from sidewalk_ai.processing.refinement import refine_sidewalk_mask
 
 from .base import Segmenter
 
@@ -87,7 +89,23 @@ class DeepLabSegmenter(Segmenter):
                 )
             )
 
+        # ── 1) RAW sidewalk mask ────────────────────────────────────────
         mask = pred == self.sidewalk_id
+
+        # ── 2) refined sidewalk mask (optional) ───────────────────────
+        mask, edge_top, edge_bot = refine_sidewalk_mask(mask)
+
+        # ── obstacle discovery (coarse, class level) ─────────────────────
+        obstacles = []
+        for cid in np.unique(pred):
+           if cid == self.sidewalk_id:
+               continue
+           inst = (pred == cid)
+           # accept only portions lying inside the sidewalk contour
+           if (inst & cv2.dilate(mask.astype(np.uint8), None, iterations=1).astype(bool)).sum() == 0:
+               continue
+           label = self.id2label.get(cid, f"class_{cid}")
+           obstacles.append((label, inst))
 
         # 6) Create segment info for debug visualization
         unique_ids = np.unique(pred)
@@ -96,7 +114,7 @@ class DeepLabSegmenter(Segmenter):
             class_name = self.id2label.get(class_id, f"class_{class_id}")
             seg_info.append((int(class_id), class_name))
 
-        return mask, pred, seg_info
+        return mask, edge_top, edge_bot, pred, seg_info, obstacles
     
     def get_class_labels(self):
         """Get class labels mapping for DeepLab"""

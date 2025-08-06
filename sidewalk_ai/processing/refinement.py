@@ -244,7 +244,7 @@ def refine_sidewalk_mask(
     min_keep_area_px: int = 5_000,
     bf_kwargs: dict | None = None,
     pl_kwargs: dict | None = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Tuple[Tuple[float, float], Tuple[float, float]]]:
     """
     Composite refinement used by the original prototype :contentReference[oaicite:3]{index=3}:
 

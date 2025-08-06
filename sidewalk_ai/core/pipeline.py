@@ -107,14 +107,17 @@ class SidewalkPipeline:
         img_rgb = read_rgb(img_path)
 
         # -------- Segmentation ---------------------------------------- #
-        sidewalk_mask, seg_map, _ = self.segmenter.segment(img_rgb)
+        obstacles = []
+        out = self.segmenter.segment(img_rgb)
+        if len(out) == 5:                       # ← keeps back-compat
+            sidewalk_mask, edge_top, edge_bot, seg_map, _ = out
+            obstacles = []
+        else:
+            sidewalk_mask, edge_top, edge_bot, seg_map, _, obstacles = out
 
         # Some back-ends (ensemble) may return a tuple of masks
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
-
-        if self.refine:
-            sidewalk_mask, edge_top, edge_bot = refine_sidewalk_mask(sidewalk_mask)
 
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
@@ -139,9 +142,10 @@ class SidewalkPipeline:
         #    width_res = width_res_1
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
+        print([lbl for lbl, _ in obstacles])
         clearances = compute_clearances(
             sidewalk_mask,
-            obstacles=[],            # supply obstacle masks here when ready
+            obstacles=obstacles,            
             depth=depth_map,
             metric_depth=metric 
         )

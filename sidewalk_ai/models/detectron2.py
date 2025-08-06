@@ -6,6 +6,9 @@ from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 
+from sidewalk_ai.models._obstacles import extract_obstacles
+from sidewalk_ai.processing.refinement import refine_sidewalk_mask
+
 from .base import Segmenter, SegmentInfo
 
 
@@ -38,9 +41,10 @@ class Detectron2Segmenter(Segmenter):
         outs = self.predictor(img_rgb)
         seg_map, seg_info_raw = outs["panoptic_seg"]
         seg_map = seg_map.cpu().numpy()
-
-        sidewalk = np.zeros_like(seg_map, dtype=bool)
+    
+        # ▸ 1) RAW sidewalk mask
         seg_info: list[SegmentInfo] = []
+        sidewalk_raw = np.zeros_like(seg_map, dtype=bool)
 
         for seg in seg_info_raw:
             cat_id = seg["category_id"]
@@ -53,9 +57,14 @@ class Detectron2Segmenter(Segmenter):
 
             seg_info.append((int(seg["id"]), name))
             if _match(name, target_label):
-                sidewalk |= seg_map == seg["id"]
+                sidewalk_raw |= seg_map == seg["id"]
 
-        return sidewalk, seg_map, seg_info
+        # ▸ 2) refine before obstacle search
+        sidewalk, edge_top, edge_bot = refine_sidewalk_mask(sidewalk_raw)
+        
+        # ▸ 3) obstacle extraction on the *refined* band
+        obstacles = extract_obstacles(seg_map, seg_info, sidewalk)
+        return sidewalk, edge_top, edge_bot, seg_map, seg_info, obstacles
     
     # ------------------------------------------------------------------ #
     # Convenience ctor – mirrors old  initialize_model(model_path)

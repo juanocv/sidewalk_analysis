@@ -24,7 +24,12 @@ class Segmenter(Protocol):
         target_label: str | list[str] = "sidewalk",
         *,
         device: str | None = None,
-    ) -> tuple[np.ndarray, np.ndarray | None, list[SegmentInfo] | None]:
+        ) -> tuple[
+        np.ndarray,                       # sidewalk mask
+        np.ndarray | None,                # seg_map / label map
+        list[SegmentInfo] | None,         # metadata
+        list[tuple[str, np.ndarray]]      # NEW – obstacles
+    ]:
         ...
 
 class DepthEstimator(Protocol):
