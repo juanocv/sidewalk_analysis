@@ -3,7 +3,6 @@
 generic/config.py
 
 # Images
-generic/images
 debug_out
 
 # pyCache
@@ -36,6 +35,9 @@ detectron2
 
 #OneFormer
 OneFormer
+
+#ZoeDepth
+ZoeDepth
 
 # CMake build
 build
