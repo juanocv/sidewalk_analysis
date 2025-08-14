@@ -56,7 +56,7 @@ class OneFormerSegmenter(Segmenter):
                 sidewalk_raw |= seg_map == seg["id"]
     
         # ▸ 2) refine before obstacle search
-        sidewalk, edge_top, edge_bot = refine_sidewalk_mask(sidewalk_raw)
+        sidewalk, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_raw)
 
         # ▸ 3) obstacle extraction on the *refined* band
         obstacles = extract_obstacles(seg_map, seg_info, sidewalk)

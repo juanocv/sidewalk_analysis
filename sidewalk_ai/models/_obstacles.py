@@ -11,7 +11,7 @@ IGNORE_LABELS   = {
     "road", "route", "building", "wall", "sky", "terrain",
     "floor", "ground", "ceiling", "bridge", "car", "bus",
     "truck", "train", "motorcycle", "bicycle", "person",
-    "sign", "street lamp", "fence"
+    "sign", "street lamp", "fence", "stairs"
 }
 
 MIN_INST_AREA_PX   = 30          # reject very tiny noise blobs

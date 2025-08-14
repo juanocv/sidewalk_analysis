@@ -204,8 +204,24 @@ def fill_between_independent_lines(
     ys_top = np.asarray(ys_top)
     ys_bot = np.asarray(ys_bot)
 
-    m_top, b_top = np.polyfit(xs, ys_top, 1)
-    m_bot, b_bot = fit_line_ransac(xs, ys_bot, ransac_thresh, ransac_trials)
+    thickness = ys_bot - ys_top
+    med_t = np.median(thickness)
+
+    # ---------- FILTRO 1: espessura mínima ----------------------
+    good = thickness >= 0.60 * med_t
+
+    # ---------- FILTRO 2: descartar colunas no rodapé -----------
+    margin = 2                                  # px de folga
+    good &= ys_bot < h - 1 - margin
+
+    xs_fit     = xs[good]
+    ys_fit_bot = ys_bot[good]
+
+    if xs_fit.size < min_cols:
+        return mask.astype(np.uint8)            # falha segura (bot_line=None)
+
+    m_top, b_top = np.polyfit(xs, ys_top, 1) # no need to use RANSAC for the top line
+    m_bot, b_bot = fit_line_ransac(xs_fit, ys_fit_bot, ransac_thresh, ransac_trials)
 
     xs_full = np.arange(w)
     y_top = np.clip((m_top * xs_full + b_top).astype(int), 0, h - 1)
@@ -229,7 +245,50 @@ def fill_between_independent_lines(
     lines = ((m_top, b_top), (m_bot, b_bot))
     return (filled, lines) if return_lines else filled
 
+def shave_above_top_envelope(
+    m: np.ndarray,
+    max_above_px: int | None = None,
+    smooth_kernel: int = 15,
+    min_cols: int = 30,
+) -> np.ndarray:
+    """
+    Zera pixels acima do invólucro superior (top envelope) do cluster
+    original, com uma margem de segurança.
 
+    - Se max_above_px=None, a margem é adaptativa: ~8% da espessura mediana.
+    """
+    h, w = m.shape
+    m = (m > 0).astype(np.uint8)
+
+    # top/bottom por coluna
+    top = np.full(w, -1, dtype=int)
+    bot = np.full(w, -1, dtype=int)
+    for x in range(w):
+        ys = np.flatnonzero(m[:, x])
+        if ys.size:
+            top[x], bot[x] = ys[0], ys[-1]
+
+    have = (top >= 0) & (bot >= 0)
+    if have.sum() < min_cols:
+        return m  # pouco sinal → devolve como está
+
+    # suaviza o contorno superior para robustez
+    top_s = median_filter(top, size=smooth_kernel)
+
+    # margem: absoluta (se dada) ou adaptativa pela espessura mediana
+    if max_above_px is None:
+        thick = (bot[have] - top[have]).astype(float)
+        med_t = np.median(thick)
+        margin_t = max(2, int(0.08 * med_t))  # ~8% da espessura típica
+    else:
+        margin_t = int(max(1, max_above_px))
+
+    out = m.copy()
+    for x in range(w):
+        if top_s[x] >= 0:
+            y_cut = max(0, top_s[x] - margin_t)
+            out[:y_cut, x] = 0
+    return out
 
 # --------------------------------------------------------------------------- #
 # 3)  High-level pipeline  (≈ refine_sidewalk_mask)                           #
@@ -260,6 +319,20 @@ def refine_sidewalk_mask(
     m0 = mask.astype(bool)
     m = np.zeros_like(m0, dtype=np.uint8)
 
+    print(f"Refining sidewalk mask: {m0.sum()} px positive")
+    cv2.imwrite("debug_0_raw.png", (m0 * 255).astype(np.uint8))
+
+    # 0) shave above top envelope (remove overhanging patches, etc)
+    m0 = shave_above_top_envelope(
+        m0.astype(np.uint8),
+        max_above_px=None,        # adaptative (~8% thickness)
+        smooth_kernel=15,
+        min_cols=30,
+    ).astype(bool)
+
+    print(f" After shaving: {m0.sum()} px positive")
+    cv2.imwrite("debug_1_shaved.png", (m0 * 255).astype(np.uint8))
+
     # 1) band-wise closing (deals with perspective foreshortening)
     if bands is None:
         bands = [(0.00, 0.35, 25), (0.35, 0.70, 15), (0.70, 1.00, 9)]
@@ -270,6 +343,9 @@ def refine_sidewalk_mask(
             m0[y0:y1].astype(np.uint8), cv2.MORPH_CLOSE, ker, iterations=close_iter
         )
 
+    print(f" After band-wise closing: {m.sum()} px positive")
+    cv2.imwrite("debug_2_bandclosed.png", (m * 255).astype(np.uint8))
+                
     # 2) anisotropic bound: dilate raw mask, then keep only what intersects band
     dil = cv2.getStructuringElement(
         cv2.MORPH_RECT, (2 * max_gap_x + 1, 2 * max_gap_y + 1)
@@ -277,11 +353,17 @@ def refine_sidewalk_mask(
     allowed = cv2.dilate(m0.astype(np.uint8), dil)
     m &= allowed
 
+    print(f" After anisotropic dilation bound: {m.sum()} px positive")
+    cv2.imwrite("debug_3_dilbound.png", (m * 255).astype(np.uint8))
+
     # 3) bridge-fill car/bush occlusions
     m = bridge_fill_between_edges(
         m,
         **(bf_kwargs or dict(smooth_kernel=5, min_valid_cols=2, clamp_to=h - 30)),
     )
+
+    print(f" After bridge-fill: {m.sum()} px positive")
+    cv2.imwrite("debug_4_bridgefill.png", (m * 255).astype(np.uint8))
 
     # 4) hole fill + remove tiny speckles
     m = ndimage.binary_fill_holes(m.astype(bool)).astype(np.uint8)
@@ -291,13 +373,20 @@ def refine_sidewalk_mask(
         if stats[i, cv2.CC_STAT_AREA] >= min_keep_area_px:
             keep[lbl == i] = 1
 
+    print(f" After hole-fill + speckle removal: {keep.sum()} px positive")
+    cv2.imwrite("debug_5_holefill.png", (keep * 255).astype(np.uint8))
+                
     # 5) two-line infill (parallel curbs)
     mask, (top_line, bot_line) = fill_between_independent_lines(
         keep,
         **(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200)),
         return_lines=True,
     )
-    return mask, top_line, bot_line
+
+    print(f" After two-line infill: {mask.sum()} px positive")
+    cv2.imwrite("debug_6_twoline.png", (mask * 255).astype(np.uint8))
+
+    return mask, (top_line, bot_line)
 
 
 # --------------------------------------------------------------------------- #

@@ -9,13 +9,11 @@ import numpy as np
 
 from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.io.streetview import StreetViewClient, ImageRequest
-from sidewalk_ai.processing.refinement import refine_sidewalk_mask
 from sidewalk_ai.processing.geometry import (
      WidthResult,
      ClearanceResult,
      compute_width,
      compute_clearances,
-     compute_width_from_curbs,
  )
 from sidewalk_ai.processing.fusion import logical_fuse
 from sidewalk_ai.models.base import Segmenter
