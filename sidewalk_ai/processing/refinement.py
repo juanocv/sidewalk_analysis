@@ -319,8 +319,8 @@ def refine_sidewalk_mask(
     m0 = mask.astype(bool)
     m = np.zeros_like(m0, dtype=np.uint8)
 
-    print(f"Refining sidewalk mask: {m0.sum()} px positive")
-    cv2.imwrite("debug_0_raw.png", (m0 * 255).astype(np.uint8))
+    #print(f"Refining sidewalk mask: {m0.sum()} px positive")
+    #cv2.imwrite("debug_0_raw.png", (m0 * 255).astype(np.uint8))
 
     # 0) shave above top envelope (remove overhanging patches, etc)
     m0 = shave_above_top_envelope(
@@ -330,8 +330,8 @@ def refine_sidewalk_mask(
         min_cols=30,
     ).astype(bool)
 
-    print(f" After shaving: {m0.sum()} px positive")
-    cv2.imwrite("debug_1_shaved.png", (m0 * 255).astype(np.uint8))
+    #print(f" After shaving: {m0.sum()} px positive")
+    #cv2.imwrite("debug_1_shaved.png", (m0 * 255).astype(np.uint8))
 
     # 1) band-wise closing (deals with perspective foreshortening)
     if bands is None:
@@ -343,8 +343,8 @@ def refine_sidewalk_mask(
             m0[y0:y1].astype(np.uint8), cv2.MORPH_CLOSE, ker, iterations=close_iter
         )
 
-    print(f" After band-wise closing: {m.sum()} px positive")
-    cv2.imwrite("debug_2_bandclosed.png", (m * 255).astype(np.uint8))
+    #print(f" After band-wise closing: {m.sum()} px positive")
+    #cv2.imwrite("debug_2_bandclosed.png", (m * 255).astype(np.uint8))
                 
     # 2) anisotropic bound: dilate raw mask, then keep only what intersects band
     dil = cv2.getStructuringElement(
@@ -353,8 +353,8 @@ def refine_sidewalk_mask(
     allowed = cv2.dilate(m0.astype(np.uint8), dil)
     m &= allowed
 
-    print(f" After anisotropic dilation bound: {m.sum()} px positive")
-    cv2.imwrite("debug_3_dilbound.png", (m * 255).astype(np.uint8))
+    #print(f" After anisotropic dilation bound: {m.sum()} px positive")
+    #cv2.imwrite("debug_3_dilbound.png", (m * 255).astype(np.uint8))
 
     # 3) bridge-fill car/bush occlusions
     m = bridge_fill_between_edges(
@@ -362,8 +362,8 @@ def refine_sidewalk_mask(
         **(bf_kwargs or dict(smooth_kernel=5, min_valid_cols=2, clamp_to=h - 30)),
     )
 
-    print(f" After bridge-fill: {m.sum()} px positive")
-    cv2.imwrite("debug_4_bridgefill.png", (m * 255).astype(np.uint8))
+    #print(f" After bridge-fill: {m.sum()} px positive")
+    #cv2.imwrite("debug_4_bridgefill.png", (m * 255).astype(np.uint8))
 
     # 4) hole fill + remove tiny speckles
     m = ndimage.binary_fill_holes(m.astype(bool)).astype(np.uint8)
@@ -373,8 +373,8 @@ def refine_sidewalk_mask(
         if stats[i, cv2.CC_STAT_AREA] >= min_keep_area_px:
             keep[lbl == i] = 1
 
-    print(f" After hole-fill + speckle removal: {keep.sum()} px positive")
-    cv2.imwrite("debug_5_holefill.png", (keep * 255).astype(np.uint8))
+    #print(f" After hole-fill + speckle removal: {keep.sum()} px positive")
+    #cv2.imwrite("debug_5_holefill.png", (keep * 255).astype(np.uint8))
                 
     # 5) two-line infill (parallel curbs)
     mask, (top_line, bot_line) = fill_between_independent_lines(
@@ -383,8 +383,8 @@ def refine_sidewalk_mask(
         return_lines=True,
     )
 
-    print(f" After two-line infill: {mask.sum()} px positive")
-    cv2.imwrite("debug_6_twoline.png", (mask * 255).astype(np.uint8))
+    #print(f" After two-line infill: {mask.sum()} px positive")
+    #cv2.imwrite("debug_6_twoline.png", (mask * 255).astype(np.uint8))
 
     return mask, (top_line, bot_line)
 
