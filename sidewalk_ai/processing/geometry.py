@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+import math
+from typing import Iterable, Optional, Sequence, Tuple
+import matplotlib.pyplot as plt
 
 import cv2, os
 import numpy as np
@@ -28,6 +30,8 @@ class ClearanceResult:
     L_m: float               # free space on the left  of the obstacle
     R_m: float               # free space on the right
     total_m: float           # L+R+obstacle width
+    L_pixel: Optional[tuple[int, int]] = None  # (x, y)
+    R_pixel: Optional[tuple[int, int]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -240,45 +244,276 @@ def compute_width(
     
     return WidthResult(width, margin, len(widths))
 
+def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int = 6) -> np.ndarray:
+    """Select bottom `percent` of True pixels in mask by y-coordinate."""
+    mask_bool = np.asarray(mask) != 0
+    ys, xs = np.nonzero(mask_bool)
+    if ys.size == 0:
+        return np.zeros_like(mask_bool, dtype=bool)
+    th = np.percentile(ys, 100.0 - float(percent))
+    sel = (ys >= th)
+    if sel.sum() < min_pixels:
+        return np.zeros_like(mask_bool, dtype=bool)
+    out = np.zeros_like(mask_bool, dtype=bool)
+    out[ys[sel], xs[sel]] = True
+    return out
 
 def compute_clearances(
     sidewalk:   np.ndarray,                 # bool H×W
+    top_mask:   Tuple[float, float],          
+    bot_mask:   Tuple[float, float],          
     obstacles:  Sequence[tuple[str, np.ndarray]],   # (label, bool-mask)
     depth:      np.ndarray,
-    *,                                  # ← force keyword-only below
-    metric_depth:  bool = False,        # ← NEW (True for ZoeDepth)
-    FOV_deg:    float = 70.0,
-    h_up_px:    int = 12,
-    contact_gap: int = 25,
+    pitch_deg:  float = -10.0,
+    FOV_deg:    float = 75.0,
+    bottom_percent: float = 5.0,
+    min_cand_pixels: int = 6,
+    return_candidates: bool = False
 ) -> list[ClearanceResult]:
-    """
-    Vectorised re-implementation of `clearance_m()` :contentReference[oaicite:2]{index=2}
-    returning structured results for **all** obstacles at once.
-    """
-    H, W = sidewalk.shape
-    fx = W / (2.0 * np.tan(np.radians(FOV_deg / 2)))
-    cx = W / 2
-    fy = fx
-    cy = H / 2
 
-    α = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
+    H, W = sidewalk.shape[:2]
+    fx, fy, cx, cy = _intrinsics_after_crop(W, H, CROP_BOTTOM, FOV_deg)
 
-    results: list[ClearanceResult] = []
-    for label, obs in obstacles:
-        band = _contact_band(sidewalk, obs, h_up_px, contact_gap)
-        if band is None:
+    a_top, c_top = project_line_to_ground(*top_mask, fx, fy, cx, cy, pitch_deg)
+    a_bot, c_bot = project_line_to_ground(*bot_mask, fx, fy, cx, cy, pitch_deg)
+
+    denom_top = math.sqrt(a_top * a_top + 1.0)
+    denom_bot = math.sqrt(a_bot * a_bot + 1.0)
+
+    alpha = 1.0
+    if depth is not None:
+        alpha = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
+
+    results = []
+    base_candidate_masks = []
+
+    def project_pixel_to_ground(u_px, v_px):
+        if depth is not None and depth[v_px, u_px] > 0:
+            Zm = depth[v_px, u_px] * float(alpha)
+            Xm = (u_px - cx) * Zm / fx
+            return Xm, Zm
+        else:
+            Xg, Zg = _ground_intersection(
+                np.array([u_px]), np.array([v_px]), fx, fy, cx, cy, pitch_deg
+            )
+            return Xg[0], Zg[0]
+
+    for label, omask in obstacles:
+        omask_bool = omask.astype(bool)
+        if omask_bool.sum() == 0:
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, None))
+            base_candidate_masks.append(np.zeros_like(omask_bool))
             continue
-        px = _px_clearance(sidewalk, band)
-        if px is None:
+
+        # Candidate mask = bottom % of overlap with sidewalk
+        overlap = omask_bool & sidewalk.astype(bool)
+        cand_mask = np.zeros_like(omask_bool)
+        if overlap.sum() > 0:
+            cand_mask = bottom_percent_mask(overlap, bottom_percent, min_cand_pixels)
+        if cand_mask.sum() == 0:
+            # Fallback: bottom-most band of obstacle
+            ys, xs = np.nonzero(omask_bool)
+            vmax = int(np.max(ys))
+            band_threshold = max(0, vmax - 8 + 1)  # default 8px band
+            band_idx = (ys >= band_threshold)
+            cand_mask[ys[band_idx], xs[band_idx]] = True
+
+        base_candidate_masks.append(cand_mask.copy())
+
+        if cand_mask.sum() == 0:
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, None))
             continue
-        l_px, r_px, t_px = px
-        rows = np.unique(np.where(band)[0])
-        Z_band = α * depth[rows].mean()
-        scale  = Z_band / fx
-        results.append(
-            ClearanceResult(label, l_px * scale, r_px * scale, t_px * scale)
-        )
-    return results or [ClearanceResult("none", -1.0, -1.0, -1.0)]
+
+        # Pick leftmost and rightmost pixels in candidate base
+        cand_v, cand_u = np.nonzero(cand_mask)
+        left_idx = np.argmin(cand_u)
+        right_idx = np.argmax(cand_u)
+        L_pixel_img = (int(cand_u[left_idx]), int(cand_v[left_idx]))
+        R_pixel_img = (int(cand_u[right_idx]), int(cand_v[right_idx]))
+
+        # Project them to ground
+        LX, LZ = project_pixel_to_ground(*L_pixel_img)
+        RX, RZ = project_pixel_to_ground(*R_pixel_img)
+
+        # Distances from each pixel to each curb
+        dL_top = abs(a_top * LX - LZ + c_top) / denom_top
+        dL_bot = abs(a_bot * LX - LZ + c_bot) / denom_bot
+        dR_top = abs(a_top * RX - RZ + c_top) / denom_top
+        dR_bot = abs(a_bot * RX - RZ + c_bot) / denom_bot
+
+        # Which curb is left/right? Compare curb X positions at median Z
+        Zv_med = float(np.median([LZ, RZ]))
+        def curb_X(a, c, Zq):
+            return (Zq - c) / a if abs(a) > 1e-9 else float("inf")
+        Xtop_med = curb_X(a_top, c_top, Zv_med)
+        Xbot_med = curb_X(a_bot, c_bot, Zv_med)
+
+        if Xtop_med <= Xbot_med:
+            L_m = dL_top
+            R_m = dR_bot
+        else:
+            L_m = dL_bot
+            R_m = dR_top
+
+        obs_width = abs(RX - LX)
+        total_m = L_m + R_m + obs_width
+
+        results.append(ClearanceResult(label, L_m, R_m, total_m, L_pixel_img, R_pixel_img))
+
+    if return_candidates:
+        return results, base_candidate_masks
+    return results
+
+
+def plot_clearance_overlay_debug(
+    image: np.ndarray,
+    top: Tuple[float, float],
+    bot: Tuple[float, float],
+    obstacles: Sequence[tuple[str, np.ndarray]],
+    clearance_results: Sequence,
+    sidewalk: Optional[np.ndarray] = None,
+    base_candidate_masks: Optional[Sequence[np.ndarray]] = None,
+    BASE_BAND_PIXELS: int = 1,
+    assume_rgb: bool = True,
+    figsize=(12,8)
+):
+    """
+    More advanced overlay for debugging:
+      - draws candidate base components (magenta)
+      - draws chosen L_pixel (yellow) and R_pixel (cyan)
+      - draws perpendicular line from chosen pixel to image curb line (white)
+      - shows labels and values
+    If base_candidate_masks is None the function recomputes candidates with the same
+    rules used in compute_clearances (so you can call it even if you didn't request
+    candidates to be returned).
+    """
+    H, W = image.shape[:2]
+    if assume_rgb:
+        draw_img = cv2.cvtColor(image.copy(), cv2.COLOR_RGB2BGR)
+    else:
+        draw_img = image.copy()
+
+    # draw curb lines (image-space)
+    def draw_line_image(m, b, color, thickness=2):
+        x0, x1 = 0, W-1
+        y0 = int(round(m * x0 + b))
+        y1 = int(round(m * x1 + b))
+        cv2.line(draw_img, (x0, y0), (x1, y1), color, thickness, lineType=cv2.LINE_AA)
+
+    draw_line_image(top[0], top[1], (0,0,255), 2)   # red
+    draw_line_image(bot[0], bot[1], (0,255,0), 2)   # green
+
+    for idx, ((label, omask), res) in enumerate(zip(obstacles, clearance_results)):
+        om = omask.astype(bool)
+        if om.sum() == 0:
+            continue
+
+        # shade obstacle
+        #blue = np.array([255,0,0], dtype=np.uint8)  # BGR
+        #alpha = 0.45
+        #draw_img[om] = (draw_img[om].astype(np.float32)*(1-alpha) + blue.astype(np.float32)*alpha).astype(np.uint8)
+
+        # get or compute candidate mask
+        if base_candidate_masks is not None:
+            try:
+                cand_mask = base_candidate_masks[idx].astype(bool)
+            except Exception:
+                cand_mask = None
+        else:
+            cand_mask = None
+
+        if cand_mask is None or cand_mask.sum() == 0:
+            # compute same rule as compute_clearances: overlap with sidewalk if available, else bottom band
+            cand_mask = np.zeros_like(om)
+            if sidewalk is not None:
+                overlap = om & sidewalk
+                if overlap.sum() > 0:
+                    cand_mask = overlap.copy()
+                else:
+                    ys, xs = np.nonzero(om)
+                    vmax = int(np.max(ys))
+                    band_threshold = max(0, vmax - BASE_BAND_PIXELS + 1)
+                    band_mask = (ys >= band_threshold)
+                    cand_mask[ys[band_mask], xs[band_mask]] = True
+            else:
+                ys, xs = np.nonzero(om)
+                vmax = int(np.max(ys))
+                band_threshold = max(0, vmax - BASE_BAND_PIXELS + 1)
+                band_mask = (ys >= band_threshold)
+                cand_mask[ys[band_mask], xs[band_mask]] = True
+
+        # optional: compute components and draw outlines for each component
+        if cand_mask.sum() > 0:
+            # find components
+            num, comp = cv2.connectedComponents(cand_mask.astype(np.uint8))
+            for cidx in range(1, num):
+                comp_mask = (comp == cidx)
+                # fill with semi-transparent magenta
+                mag = np.array([255,0,255], dtype=np.uint8)
+                beta = 0.65
+                draw_img[comp_mask] = (draw_img[comp_mask].astype(np.float32)*(1-beta) + mag.astype(np.float32)*beta).astype(np.uint8)
+                # draw contour outline
+                # contours expect uint8 uint8 image
+                cont_img = (comp_mask.astype(np.uint8)*255)
+                cnts, _ = cv2.findContours(cont_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                cv2.drawContours(draw_img, cnts, -1, (255,255,255), 1, lineType=cv2.LINE_AA)
+
+        # draw chosen pixels
+        if hasattr(res, 'L_pixel') and res.L_pixel is not None:
+            xL, yL = int(res.L_pixel[0]), int(res.L_pixel[1])
+            cv2.circle(draw_img, (xL, yL), 3, (0,255,255), -1, lineType=cv2.LINE_AA)  # yellow
+            cv2.circle(draw_img, (xL, yL), 3, (255,255,255), 1, lineType=cv2.LINE_AA)
+
+            # compute perpendicular projection point on image curb line (top and bot are image-space)
+            # pick the line that corresponds to 'left' depending on L_pixel being result of top/bot
+            # we will draw perpendiculars to both curbs for clarity
+            for m,b,color in ((top[0], top[1], (255,255,255)), (bot[0], bot[1], (200,200,200))):
+                # project (xL,yL) to nearest point on image line y = m*x + b:
+                if abs(m) < 1e-9:
+                    # horizontal line; clamp x to xL
+                    xproj = xL
+                else:
+                    xproj = (xL + m*(yL - b)) / (1 + m*m)
+                yproj = int(round(m * xproj + b))
+                xproj = int(round(xproj))
+                # draw small line
+                cv2.line(draw_img, (xL, yL), (xproj, yproj), color, 2, lineType=cv2.LINE_AA)
+
+        if hasattr(res, 'R_pixel') and res.R_pixel is not None:
+            xR, yR = int(res.R_pixel[0]), int(res.R_pixel[1])
+            cv2.circle(draw_img, (xR, yR), 3, (255,255,0), -1, lineType=cv2.LINE_AA)  # cyan
+            cv2.circle(draw_img, (xR, yR), 3, (255,255,255), 1, lineType=cv2.LINE_AA)
+
+            for m,b,color in ((top[0], top[1], (255,255,255)), (bot[0], bot[1], (200,200,200))):
+                if abs(m) < 1e-9:
+                    xproj = xR
+                else:
+                    xproj = (xR + m*(yR - b)) / (1 + m*m)
+                yproj = int(round(m * xproj + b))
+                xproj = int(round(xproj))
+                cv2.line(draw_img, (xR, yR), (xproj, yproj), color, 2, lineType=cv2.LINE_AA)
+
+        # write label
+        ys, xs = np.nonzero(om)
+        cy, cx = int(np.mean(ys)), int(np.mean(xs))
+        Ls = f"{getattr(res, 'L_m', 0.0):.2f}"
+        Rs = f"{getattr(res, 'R_m', 0.0):.2f}"
+        text = f"{label}: L={Ls}m R={Rs}m"
+        text_pos = (max(0, cx - 40), max(0, cy - 10))
+        cv2.putText(draw_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, lineType=cv2.LINE_AA)
+
+    # convert back to RGB for display
+    if assume_rgb:
+        disp = cv2.cvtColor(draw_img, cv2.COLOR_BGR2RGB)
+    else:
+        disp = draw_img
+
+    plt.figure(figsize=figsize)
+    plt.imshow(disp)
+    plt.axis('off')
+    plt.show()
+    return disp
+
 
 # --------------------------------------------------------------------------- #
 # 3)  Internal helpers (kept private)
@@ -314,81 +549,3 @@ def ortho_distance(a1,c1, a2,c2):
     """
     a = 0.5*(a1 + a2)
     return abs(c2 - c1) / np.sqrt(1 + a*a)
-
-
-def _contact_band(S: np.ndarray, O: np.ndarray,
-                  h_up: int, max_gap: int) -> np.ndarray | None:
-    """
-    Identical logic to `contact_band()` in the prototype :contentReference[oaicite:3]{index=3}.
-    """
-    H, _ = S.shape
-    band = np.zeros_like(O, bool)
-    for x in np.unique(np.where(O)[1]):
-        y_bot = np.where(O[:, x])[0].max()
-        for dy in range(max_gap + 1):
-            y = y_bot + dy
-            if y >= H:
-                break
-            if S[y, x]:
-                band[max(0, y_bot - h_up + 1): y_bot + 1, x] = True
-                break
-    return band if band.any() else None
-
-
-def _safe_col_at_row(m_img, b_img, row, *, mask_row, side, W):
-    """
-    Devolve a coluna (int) que melhor representa a guia no 'row':
-    1. Calcula u0 = intersecção reta × linha.
-    2. Se u0 está dentro do quadro e mask_row[u0]==1 → OK.
-    3. Caso contrário, procura o pixel 1 mais próximo **dentro do quadro**
-       caminhando para dentro (→ se 'side' == "right", ← se "left").
-       Se não encontrar, devolve None.
-    """
-    if abs(m_img) < 1e-6:                    # reta horizontal → faz skip
-        return None
-
-    u0 = int(round((row - b_img) / m_img))
-    u0 = np.clip(u0, 0, W - 1)               # ainda dentro dos limites
-
-    if mask_row[u0]:                         # bateu direto na calçada
-        return u0
-
-    if side == "left":
-        # anda para a direita até achar um pixel 1
-        for u in range(u0 + 1, W):
-            if mask_row[u]:
-                return u
-    else:  # "right"
-        # anda para a esquerda
-        for u in range(u0 - 1, -1, -1):
-            if mask_row[u]:
-                return u
-    return None                              # nada encontrado
-    
-
-def _px_clearance(S: np.ndarray, band: np.ndarray) -> tuple[int, int, int] | None:
-    """
-    Pixel-domain clearance measurement adapted from `clearance_px_scan` :contentReference[oaicite:4]{index=4}
-    but without Python loops inside the hotspot.
-    """
-    free = (S & ~band).astype(np.uint8)
-    distL = cv2.distanceTransform(free, cv2.DIST_L1, 3)
-    distR = cv2.distanceTransform(free[:, ::-1], cv2.DIST_L1, 3)[:, ::-1]
-
-    rows = np.unique(np.where(band)[0])
-    if rows.size == 0:
-        return None
-
-    l_px = np.inf
-    r_px = np.inf
-    t_px = np.inf
-    for y in rows:
-        walk = np.where(S[y])[0]
-        obs  = np.where(band[y])[0]
-        if walk.size < 2 or obs.size == 0:
-            continue
-        l_px = min(l_px, obs.min()  - walk.min())
-        r_px = min(r_px, walk.max() - obs.max())
-        t_px = min(t_px, l_px + r_px + (obs.max() - obs.min() + 1))
-
-    return None if np.isinf(l_px) else (int(l_px), int(r_px), int(t_px))
