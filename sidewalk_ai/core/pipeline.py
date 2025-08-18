@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Iterable, Sequence
 
 import numpy as np
 
+from sidewalk_ai.processing.refinement import refine_sidewalk_mask
 from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.io.streetview import StreetViewClient, ImageRequest
+from sidewalk_ai.models._obstacles import extract_obstacles
 from sidewalk_ai.processing.geometry import (
      WidthResult,
      ClearanceResult,
@@ -29,6 +32,7 @@ class Result:
     width: WidthResult
     clearances: Sequence[ClearanceResult]
     sidewalk_mask: np.ndarray          # H×W  uint8  (0/1)
+    refined_mask: np.ndarray | None = None  # H×W  uint8  (0/1)
     seg_map: np.ndarray | None = None  # panoptic id map (optional)
     img_path: Path | None = None
     rgb_image: np.ndarray | None = None  # H×W×3  uint8 (RGB)
@@ -104,24 +108,37 @@ class SidewalkPipeline:
     def _analyse_path(self, img_path: Path) -> Result:
         img_rgb = read_rgb(img_path)
 
-        # -------- Segmentation ---------------------------------------- #
+        #initial_time = time.time()
+        # -------- Mask Segmentation -------- #
         obstacles = []
         out = self.segmenter.segment(img_rgb)
-        if len(out) == 5:                       # ← keeps back-compat
-            sidewalk_mask, edge_top, edge_bot, seg_map, _ = out
-            obstacles = []
-        else:
-            sidewalk_mask, edge_top, edge_bot, seg_map, _, obstacles = out
+        if len(out) == 3:
+            sidewalk_mask, seg_map, seg_info = out # for either detectron2 or oneformer
+        elif len(out) == 4:
+            sidewalk_mask, seg_map, seg_info, obstacles = out # for deeplab
 
         # Some back-ends (ensemble) may return a tuple of masks
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
+        #print(f"Segmentation took {time.time() - initial_time:.4f} seconds")
+
+        # -------- Mask Refinement -------- #
+        refined_mask, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_mask)
+        #print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
+
+        # -------- Obstacle Extraction -------- #
+        if obstacles is None:
+            obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
+        #print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
+
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
         metric = getattr(self.depth_est, "is_metric", False)
         width_res = compute_width(sidewalk_mask, depth_map)
-        
+
+        #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
+
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
         print([lbl for lbl, _ in obstacles])
@@ -132,12 +149,16 @@ class SidewalkPipeline:
             metric_depth=metric 
         )
 
+        #print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
+
+        # -------- Return Result --------------------------------------- #
         self._last_rgb = img_rgb  # for debugging
 
         return Result(
             width=width_res,
             clearances=clearances,
             sidewalk_mask=sidewalk_mask,
+            refined_mask=refined_mask,
             seg_map=seg_map,
             img_path=img_path,
             rgb_image=img_rgb

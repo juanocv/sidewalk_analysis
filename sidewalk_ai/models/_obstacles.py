@@ -9,9 +9,9 @@ from typing import List, Sequence, Tuple
 SIDEWALK_LABELS = ("sidewalk", "pavement")          # synonyms
 IGNORE_LABELS   = {
     "road", "route", "building", "wall", "sky", "terrain",
-    "floor", "ground", "ceiling", "bridge", "car", "bus",
+    "floor", "earth", "ceiling", "bridge", "car", "bus",
     "truck", "train", "motorcycle", "bicycle", "person",
-    "sign", "street lamp", "fence", "stairs"
+    "street lamp", "fence",
 }
 
 MIN_INST_AREA_PX   = 30          # reject very tiny noise blobs

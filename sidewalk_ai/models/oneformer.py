@@ -4,8 +4,7 @@ import numpy as np
 import torch
 from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
 
-from sidewalk_ai.models._obstacles import extract_obstacles
-from sidewalk_ai.processing.refinement import refine_sidewalk_mask
+from sidewalk_ai.processing.refinement import shave_above_top_envelope
 
 from .base import Segmenter, SegmentInfo
 
@@ -55,12 +54,15 @@ class OneFormerSegmenter(Segmenter):
             if _match(name, target_label):
                 sidewalk_raw |= seg_map == seg["id"]
     
-        # ▸ 2) refine before obstacle search
-        sidewalk, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_raw)
+        # ▸ 2) Simple refinement (shave above top envelope (remove overhanging patches, etc))
+        mask = shave_above_top_envelope(
+            sidewalk_raw.astype(np.uint8),
+            max_above_px=None,        # adaptative (~8% thickness)
+            smooth_kernel=11,
+            min_cols=30,
+        ).astype(bool)
 
-        # ▸ 3) obstacle extraction on the *refined* band
-        obstacles = extract_obstacles(seg_map, seg_info, sidewalk)
-        return sidewalk, edge_top, edge_bot, seg_map, seg_info, obstacles
+        return mask, seg_map, seg_info
 
 
 def _match(name: str, target) -> bool:

@@ -5,7 +5,7 @@ import torch, cv2
 from torchvision import transforms
 from PIL import Image
 
-from sidewalk_ai.processing.refinement import refine_sidewalk_mask
+from sidewalk_ai.processing.refinement import shave_above_top_envelope
 
 from .base import Segmenter
 
@@ -89,13 +89,18 @@ class DeepLabSegmenter(Segmenter):
                 )
             )
 
-        # ── 1) RAW sidewalk mask ────────────────────────────────────────
+        # 6) RAW sidewalk mask ────────────────────────────────────────
         mask = pred == self.sidewalk_id
 
-        # ── 2) refined sidewalk mask (optional) ───────────────────────
-        mask, edge_top, edge_bot = refine_sidewalk_mask(mask)
-
-        # ── obstacle discovery (coarse, class level) ─────────────────────
+        # 7) simple refinement ────────────────────────────────────────
+        mask = shave_above_top_envelope(
+            mask.astype(np.uint8),
+            max_above_px=None,        # adaptative (~8% thickness)
+            smooth_kernel=11,
+            min_cols=30,
+        ).astype(bool)
+        
+        # 8) obstacle discovery (coarse, class level) ─────────────────────
         obstacles = []
         for cid in np.unique(pred):
            if cid == self.sidewalk_id:
@@ -107,14 +112,14 @@ class DeepLabSegmenter(Segmenter):
            label = self.id2label.get(cid, f"class_{cid}")
            obstacles.append((label, inst))
 
-        # 6) Create segment info for debug visualization
+        # 9) Create segment info for debug visualization
         unique_ids = np.unique(pred)
         seg_info = []
         for class_id in unique_ids:
             class_name = self.id2label.get(class_id, f"class_{class_id}")
             seg_info.append((int(class_id), class_name))
 
-        return mask, edge_top, edge_bot, pred, seg_info, obstacles
+        return mask, pred, seg_info, obstacles
     
     def get_class_labels(self):
         """Get class labels mapping for DeepLab"""

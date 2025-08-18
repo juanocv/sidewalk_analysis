@@ -261,7 +261,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
         tiles.append(add_title(np.hstack([overlay,legend]),"Panoptic overlay"))
 
     # 2 refined overlay
-    # tiles.append(add_title(overlay_mask(img_bgr,res.sidewalk_mask.astype(bool)),"Sidewalk (refined mask)"))
+    # tiles.append(add_title(overlay_mask(img_bgr,res.refined_mask.astype(bool)),"Sidewalk (refined mask)"))
 
     # 2 apply refined overlay / masks / ensemble
     if is_ensemble:
@@ -274,7 +274,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
 
             # Prepare mask tiles in the desired order
             mask_tiles = []
-            for j, m in enumerate([m1, m2, res.sidewalk_mask]):
+            for j, m in enumerate([m1, m2, res.refined_mask]):
                 mask_bin = (m > 0).astype(np.uint8) * 255
                 mask_img = cv2.cvtColor(mask_bin, cv2.COLOR_GRAY2BGR)
                 if j == 0:
@@ -288,17 +288,17 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             # Now append in the desired order:
             # 1. Mask A, 2. Mask B, 3. Ensemble mask, 4. Refined mask, 5. Depth
             tiles = mask_tiles  # Mask A, Mask B, Ensemble mask
-            tiles.append(add_title(overlay_mask(img_bgr, res.sidewalk_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
+            tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
         else:
             # Fallback if ensemble structure is different
-            tiles.append(add_title(cv2.cvtColor(res.sidewalk_mask.astype(np.uint8)*255,
+            tiles.append(add_title(cv2.cvtColor(res.refined_mask.astype(np.uint8)*255,
                                                 cv2.COLOR_GRAY2BGR),
                                 "Sidewalk (refined mask only)"))
-            tiles.append(add_title(overlay_mask(img_bgr, res.sidewalk_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
+            tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
     else:
         # Non-ensemble: keep original order
-        tiles.append(add_title(overlay_mask(img_bgr, res.sidewalk_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
-        tiles.append(add_title(cv2.cvtColor(res.sidewalk_mask.astype(np.uint8)*255,
+        tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
+        tiles.append(add_title(cv2.cvtColor(res.refined_mask.astype(np.uint8)*255,
                                             cv2.COLOR_GRAY2BGR),
                             "Sidewalk (refined mask only)"))
 
