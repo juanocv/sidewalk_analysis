@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+import math
+from typing import Iterable, Optional, Sequence, Tuple
+import matplotlib.pyplot as plt
 
 import cv2, os
 import numpy as np
@@ -28,6 +30,9 @@ class ClearanceResult:
     L_m: float               # free space on the left  of the obstacle
     R_m: float               # free space on the right
     total_m: float           # L+R+obstacle width
+    obs_width: float | None = None  # width of the obstacle in meters
+    L_pixel: Optional[tuple[int, int]] = None  # (x, y)
+    R_pixel: Optional[tuple[int, int]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -240,45 +245,99 @@ def compute_width(
     
     return WidthResult(width, margin, len(widths))
 
+def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int = 6) -> np.ndarray:
+    """Select bottom `percent` of True pixels in mask by y-coordinate."""
+    mask_bool = np.asarray(mask) != 0
+    ys, xs = np.nonzero(mask_bool)
+    if ys.size == 0:
+        return np.zeros_like(mask_bool, dtype=bool)
+    th = np.percentile(ys, 100.0 - float(percent))
+    sel = (ys >= th)
+    if sel.sum() < min_pixels:
+        return np.zeros_like(mask_bool, dtype=bool)
+    out = np.zeros_like(mask_bool, dtype=bool)
+    out[ys[sel], xs[sel]] = True
+    return out
 
 def compute_clearances(
-    sidewalk:   np.ndarray,                 # bool H×W
-    obstacles:  Sequence[tuple[str, np.ndarray]],   # (label, bool-mask)
-    depth:      np.ndarray,
-    *,                                  # ← force keyword-only below
-    metric_depth:  bool = False,        # ← NEW (True for ZoeDepth)
-    FOV_deg:    float = 70.0,
-    h_up_px:    int = 12,
-    contact_gap: int = 25,
+    sidewalk:   np.ndarray,                 
+    top_mask:   Tuple[float, float],          
+    bot_mask:   Tuple[float, float],          
+    obstacles:  Sequence[tuple[str, np.ndarray]],
+    sidewalk_width_m: float,
+    bottom_percent: float = 5.0,
+    min_cand_pixels: int = 6,
+    return_candidates: bool = False
 ) -> list[ClearanceResult]:
-    """
-    Vectorised re-implementation of `clearance_m()` :contentReference[oaicite:2]{index=2}
-    returning structured results for **all** obstacles at once.
-    """
-    H, W = sidewalk.shape
-    fx = W / (2.0 * np.tan(np.radians(FOV_deg / 2)))
-    cx = W / 2
-    fy = fx
-    cy = H / 2
+    
+    results = []
+    base_candidate_masks = []
 
-    α = _scale_from_ground(sidewalk, depth, fx, fy, cx, cy)
+    for label, omask in obstacles:
+        omask_bool = omask.astype(bool)
+        if omask_bool.sum() == 0:
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, None))
+            base_candidate_masks.append(np.zeros_like(omask_bool))
+            continue
 
-    results: list[ClearanceResult] = []
-    for label, obs in obstacles:
-        band = _contact_band(sidewalk, obs, h_up_px, contact_gap)
-        if band is None:
+        # Select candidate base pixels (bottom % of obstacle)
+        overlap = omask_bool & sidewalk.astype(bool)
+        cand_mask = bottom_percent_mask(overlap, bottom_percent, min_cand_pixels)
+        if cand_mask.sum() == 0:
+            ys, xs = np.nonzero(omask_bool)
+            vmax = int(np.max(ys))
+            band_threshold = max(0, vmax - 8)
+            cand_mask = np.zeros_like(omask_bool)
+            cand_mask[ys[ys >= band_threshold], xs[ys >= band_threshold]] = True
+
+        base_candidate_masks.append(cand_mask.copy())
+
+        if cand_mask.sum() == 0:
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, None))
             continue
-        px = _px_clearance(sidewalk, band)
-        if px is None:
-            continue
-        l_px, r_px, t_px = px
-        rows = np.unique(np.where(band)[0])
-        Z_band = α * depth[rows].mean()
-        scale  = Z_band / fx
-        results.append(
-            ClearanceResult(label, l_px * scale, r_px * scale, t_px * scale)
-        )
-    return results or [ClearanceResult("none", -1.0, -1.0, -1.0)]
+
+        # Get leftmost and rightmost base pixels
+        cand_v, cand_u = np.nonzero(cand_mask)
+        left_idx = np.argmin(cand_u)
+        right_idx = np.argmax(cand_u)
+        L_pixel_img = (int(cand_u[left_idx]), int(cand_v[left_idx]))
+        R_pixel_img = (int(cand_u[right_idx]), int(cand_v[right_idx]))
+        
+        # Compute clearance percentages
+        xL, yL = L_pixel_img
+        xR, yR = R_pixel_img
+        
+        # Calculate sidewalk edges at obstacle's y-position
+        top_x = (yL - top_mask[1]) / top_mask[0] if abs(top_mask[0]) > 1e-5 else 0
+        bot_x = (yL - bot_mask[1]) / bot_mask[0] if abs(bot_mask[0]) > 1e-5 else 0
+        left_curb = min(top_x, bot_x)
+        right_curb = max(top_x, bot_x)
+        
+        # Calculate widths in pixels
+        total_width = right_curb - left_curb
+        left_clearance = xL - left_curb
+        right_clearance = right_curb - xR
+        
+        # Convert to percentages
+        if total_width > 1:
+            left_percent = (left_clearance / total_width)
+            right_percent = (right_clearance / total_width)
+        else:
+            left_percent, right_percent = 0.0, 0.0
+
+        # print(f"L: {left_percent * 100:.2f} % R: {right_percent * 100:.2f} % ")
+
+        results.append(ClearanceResult(
+            label=label,
+            L_m=left_percent*sidewalk_width_m,
+            R_m=right_percent*sidewalk_width_m,
+            total_m=left_percent*sidewalk_width_m + right_percent*sidewalk_width_m,
+            obs_width=sidewalk_width_m - (left_percent + right_percent) * sidewalk_width_m,
+            L_pixel=L_pixel_img,
+            R_pixel=R_pixel_img
+        ))
+
+    return (results, base_candidate_masks) if return_candidates else results
 
 # --------------------------------------------------------------------------- #
 # 3)  Internal helpers (kept private)
@@ -314,81 +373,3 @@ def ortho_distance(a1,c1, a2,c2):
     """
     a = 0.5*(a1 + a2)
     return abs(c2 - c1) / np.sqrt(1 + a*a)
-
-
-def _contact_band(S: np.ndarray, O: np.ndarray,
-                  h_up: int, max_gap: int) -> np.ndarray | None:
-    """
-    Identical logic to `contact_band()` in the prototype :contentReference[oaicite:3]{index=3}.
-    """
-    H, _ = S.shape
-    band = np.zeros_like(O, bool)
-    for x in np.unique(np.where(O)[1]):
-        y_bot = np.where(O[:, x])[0].max()
-        for dy in range(max_gap + 1):
-            y = y_bot + dy
-            if y >= H:
-                break
-            if S[y, x]:
-                band[max(0, y_bot - h_up + 1): y_bot + 1, x] = True
-                break
-    return band if band.any() else None
-
-
-def _safe_col_at_row(m_img, b_img, row, *, mask_row, side, W):
-    """
-    Devolve a coluna (int) que melhor representa a guia no 'row':
-    1. Calcula u0 = intersecção reta × linha.
-    2. Se u0 está dentro do quadro e mask_row[u0]==1 → OK.
-    3. Caso contrário, procura o pixel 1 mais próximo **dentro do quadro**
-       caminhando para dentro (→ se 'side' == "right", ← se "left").
-       Se não encontrar, devolve None.
-    """
-    if abs(m_img) < 1e-6:                    # reta horizontal → faz skip
-        return None
-
-    u0 = int(round((row - b_img) / m_img))
-    u0 = np.clip(u0, 0, W - 1)               # ainda dentro dos limites
-
-    if mask_row[u0]:                         # bateu direto na calçada
-        return u0
-
-    if side == "left":
-        # anda para a direita até achar um pixel 1
-        for u in range(u0 + 1, W):
-            if mask_row[u]:
-                return u
-    else:  # "right"
-        # anda para a esquerda
-        for u in range(u0 - 1, -1, -1):
-            if mask_row[u]:
-                return u
-    return None                              # nada encontrado
-    
-
-def _px_clearance(S: np.ndarray, band: np.ndarray) -> tuple[int, int, int] | None:
-    """
-    Pixel-domain clearance measurement adapted from `clearance_px_scan` :contentReference[oaicite:4]{index=4}
-    but without Python loops inside the hotspot.
-    """
-    free = (S & ~band).astype(np.uint8)
-    distL = cv2.distanceTransform(free, cv2.DIST_L1, 3)
-    distR = cv2.distanceTransform(free[:, ::-1], cv2.DIST_L1, 3)[:, ::-1]
-
-    rows = np.unique(np.where(band)[0])
-    if rows.size == 0:
-        return None
-
-    l_px = np.inf
-    r_px = np.inf
-    t_px = np.inf
-    for y in rows:
-        walk = np.where(S[y])[0]
-        obs  = np.where(band[y])[0]
-        if walk.size < 2 or obs.size == 0:
-            continue
-        l_px = min(l_px, obs.min()  - walk.min())
-        r_px = min(r_px, walk.max() - obs.max())
-        t_px = min(t_px, l_px + r_px + (obs.max() - obs.min() + 1))
-
-    return None if np.isinf(l_px) else (int(l_px), int(r_px), int(t_px))
