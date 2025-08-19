@@ -142,11 +142,13 @@ class SidewalkPipeline:
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
         print([lbl for lbl, _ in obstacles])
-        clearances = compute_clearances(
+        clearances, _ = compute_clearances(
             sidewalk_mask,
             obstacles=obstacles,            
-            depth=depth_map,
-            metric_depth=metric 
+            top_mask=edge_top,
+            bot_mask=edge_bot,
+            sidewalk_width_m=width_res.width_m,
+            return_candidates=False,
         )
 
         #print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
