@@ -30,6 +30,7 @@ class ClearanceResult:
     L_m: float               # free space on the left  of the obstacle
     R_m: float               # free space on the right
     total_m: float           # L+R+obstacle width
+    obs_width: float | None = None  # width of the obstacle in meters
     L_pixel: Optional[tuple[int, int]] = None  # (x, y)
     R_pixel: Optional[tuple[int, int]] = None
 
@@ -331,6 +332,7 @@ def compute_clearances(
             L_m=left_percent*sidewalk_width_m,
             R_m=right_percent*sidewalk_width_m,
             total_m=left_percent*sidewalk_width_m + right_percent*sidewalk_width_m,
+            obs_width=sidewalk_width_m - (left_percent + right_percent) * sidewalk_width_m,
             L_pixel=L_pixel_img,
             R_pixel=R_pixel_img
         ))
