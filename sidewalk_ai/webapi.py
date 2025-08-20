@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     seg = sw.build_segmenter("oneformer")       # reused by every pipe
-    sv  = sw.StreetViewClient()
+    sv  = sw.StreetViewClient()  # reused by every pipe
     app.state.sv = sv
 
     # ---- depth back-ends ------------------------------------------------
@@ -113,9 +113,18 @@ class AddressReq(BaseModel):
 class WidthResp(BaseModel):
     width_m: float
     margin_m: float
+    clearances: list["ClearanceItem"] = []
     gsv_png_b64:  str  | None = None
     mask_png_b64:  str | None = None
     overlay_png_b64: str  | None = None
+
+
+class ClearanceItem(BaseModel):
+    label: str
+    L_m: float
+    R_m: float
+    total_m: float
+    obs_width: float | None = None
 
 def _png_b64(arr: np.ndarray) -> str:
     return base64.b64encode(cv2.imencode(".png", arr)[1]).decode()
@@ -192,12 +201,26 @@ def analyse(req: AddressReq):
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
+    # map dataclass (slots=True) -> Pydantic model
+    clearance_items = [
+        ClearanceItem(
+            label=c.label,
+            L_m=c.L_m,
+            R_m=c.R_m,
+            total_m=c.total_m,
+            obs_width=c.obs_width,
+        )
+        for c in res.clearances
+    ]
+
+
     return WidthResp(
     width_m  = res.width.width_m,
     margin_m = res.width.margin_m,
+    clearances      = clearance_items,
     gsv_png_b64     = gsv_png_b64,
     mask_png_b64    = mask_png_b64,
-    overlay_png_b64 = overlay_png_b64
+    overlay_png_b64 = overlay_png_b64,
     )
 
 

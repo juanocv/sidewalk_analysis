@@ -59,7 +59,7 @@ else:
 # ──────────────────────────── Print results ─────────────────────────
 print(f"WIDTH  {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
 for c in res.clearances:
-    print(f"CLEAR  {c.label:<8} {c.total_m:.2f} m  L={c.L_m:.2f}  R={c.R_m:.2f}")
+    print(f"CLEAR  {c.label:<8} {c.obs_width:.2f} m  L={c.L_m:.2f}  R={c.R_m:.2f}")
     
 # ───────────────────────── Debug sheet ────────────────────────────
 if args.debug and args.image:

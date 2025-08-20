@@ -142,7 +142,7 @@ class SidewalkPipeline:
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
         print([lbl for lbl, _ in obstacles])
-        clearances, _ = compute_clearances(
+        clearances = compute_clearances(
             sidewalk_mask,
             obstacles=obstacles,            
             top_mask=edge_top,
