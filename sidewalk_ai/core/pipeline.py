@@ -128,7 +128,7 @@ class SidewalkPipeline:
         #print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
 
         # -------- Obstacle Extraction -------- #
-        if obstacles is None:
+        if not obstacles:
             obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
         #print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
 
