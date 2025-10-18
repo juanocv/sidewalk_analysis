@@ -276,7 +276,7 @@ def compute_width(
     band = sidewalk[y0:y1].astype(np.uint8)
     band_cov = float(band.sum()) / float(band.size) if band.size else 0.0
     # normaliza para [0,1] na faixa de interesse (≈ 10% a 35% de coverage)
-    cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))
+    cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))  # 0↔1 ~ [10%,35%]
 
     _swai_log("band", {"mode": band_mode, "y0": int(y0), "y1": int(y1)})
 
@@ -284,42 +284,44 @@ def compute_width(
         return WidthResult(0.0, 0.0, 0)
 
     # 2) quick rejects: dual sidewalks (parallel view)
-    if skip_if_dual and _has_two_curbs(sidewalk, min_gap_px=max_gap_cols):
-        return WidthResult(0.0, 0.0, 0)
+    # if skip_if_dual and _has_two_curbs(sidewalk, min_gap_px=max_gap_cols):
+    #    return WidthResult(0.0, 0.0, 0)
 
     # 3) continuity score on the band
     def _continuity_score(m, y0, y1):
-        band = m[y0:y1].astype(np.uint8)
-        if band.sum() == 0:
-            return 0.0, max_gap_cols+1
-        num, lbl, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
+        b = m[y0:y1].astype(np.uint8)
+        if b.sum() == 0:
+            return 0.0, 9999
+        num, lbl, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
         if num <= 1:
-            return 0.0, max_gap_cols+1
+            return 0.0, 9999
         areas = stats[1:, cv2.CC_STAT_AREA]
         dominant = areas.max() if areas.size else 0
         frac = float(dominant) / float(areas.sum()) if areas.sum() > 0 else 0.0
 
-        # max horizontal gap
-        cols = np.unique(np.where(band)[1])
-        if cols.size == 0:
-            gap = max_gap_cols + 1
+        cols = np.unique(np.where(b)[1])
+        if cols.size <= 1:
+            gap = 9999
         else:
             cs = np.sort(cols)
-            diffs = np.diff(cs) if cs.size > 1 else np.array([0])
+            diffs = np.diff(cs)
             gap = int(diffs.max()) if diffs.size else 0
         return frac, gap
 
     frac_dom, gap_cols = _continuity_score(sidewalk, y0, y1)
-
     _swai_log("continuity", {
-    "frac_dom": float(frac_dom),
-    "gap_cols": int(gap_cols),
-    "min_frac": float(continuity_min_frac),
-    "max_gap_cols": int(max_gap_cols)
+        "frac_dom": float(frac_dom),
+        "gap_cols": int(gap_cols)
     })
 
-    if frac_dom < continuity_min_frac or gap_cols > max_gap_cols:
+    # thresholds adaptativos:
+    # - quanto MENOR a cobertura, MENOR a exigência de fração dominante
+    # - NÃO descartamos por gap (oclusão é esperada); exigimos só linhas válidas depois
+    cont_min = 0.30 + 0.30 * cov_norm   # 0.30–0.60
+    if frac_dom < cont_min:
+        _swai_log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
         return WidthResult(0.0, 0.0, 0)
+
 
     # 4) per-row computation with gating
     du_lo, du_hi = du_range_px
@@ -329,13 +331,25 @@ def compute_width(
     was_near_perp_count = 0
     for v in v_rows:
         cols = np.where(sidewalk[v])[0]
-
-        # Em vez de usar extremos:
-        # uL, uR = cols[0], cols[-1]
-
         if cols.size < 2:
             continue
-
+        # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
+        if cols.size >= 2:
+            cs = np.sort(cols)
+            diffs = np.diff(cs)
+            if diffs.size > 0:
+                g = int(diffs.max())
+                # janela padrão de oclusão (ajuste fino se precisar)
+                #   • low coverage → aceite gaps maiores
+                gap_lo = 40
+                gap_hi = int(np.interp(cov_norm, [0.0, 1.0], [160, 120]))  # 160→120 px
+                if g >= gap_lo and g <= gap_hi:
+                    idx = int(np.argmax(diffs))
+                    left_end  = cs[idx]
+                    right_beg = cs[idx+1]
+                    bridge = np.arange(left_end, right_beg+1, dtype=int)
+                    cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
+                    cols = cs
         # q cresce com a cobertura: 0.22 → 0.30
         q = 0.22 + 0.08 * cov_norm
         uL_q = int(np.quantile(cols, q))
@@ -465,6 +479,23 @@ def compute_width(
             cols = np.where(sidewalk[v])[0]
             if cols.size < 2:
                 continue
+            # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
+            if cols.size >= 2:
+                cs = np.sort(cols)
+                diffs = np.diff(cs)
+                if diffs.size > 0:
+                    g = int(diffs.max())
+                    # janela padrão de oclusão (ajuste fino se precisar)
+                    #   • low coverage → aceite gaps maiores
+                    gap_lo = 40
+                    gap_hi = int(np.interp(cov_norm, [0.0, 1.0], [160, 120]))  # 160→120 px
+                    if g >= gap_lo and g <= gap_hi:
+                        idx = int(np.argmax(diffs))
+                        left_end  = cs[idx]
+                        right_beg = cs[idx+1]
+                        bridge = np.arange(left_end, right_beg+1, dtype=int)
+                        cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
+                        cols = cs
             # quantis internos (iguais ao loop principal)
             q = 0.22 + 0.08 * cov_norm_b
             uL_q = int(np.quantile(cols, q))
@@ -541,6 +572,8 @@ def compute_width(
         "n_depth_rows": len(widths_depth)
     })
 
+    min_rows_eff = max(5, int(0.8 * min_valid_rows)) if band_cov < 0.15 else min_valid_rows
+
     # fração de linhas com parallax válido (precisamos disto ANTES das flags)
     par_frac = (parallax_valid_count / max(1, total_rows_considered)) if total_rows_considered else 0.0
 
@@ -548,7 +581,7 @@ def compute_width(
     near_perp_dominante = (near_perp_flag_rows >= max(3, int(0.3 * max(1, rows_seen))))
     widths_geom_final = list(widths_geom_raw)
 
-    if (parallax_valid_count == 0) and (not near_perp_dominante) and (len(widths_geom_raw) >= min_valid_rows):
+    if (parallax_valid_count == 0) and (not near_perp_dominante) and (len(widths_geom_raw) >= min_rows_eff):
         med_du = float(np.median(du_list)) if len(du_list) else None
         if med_du and np.isfinite(med_du):
             # piso dinâmico sugerido pela profundidade da cena
@@ -579,7 +612,7 @@ def compute_width(
                     scale = target_du / float(du0)
                     # mistura: mantém alguma variância por linha
                     adj.append((1.0 - alpha) * w + alpha * (scale * w))
-            if len(adj) >= min_valid_rows:
+            if len(adj) >= min_rows_eff:
                 widths_geom_final = adj
 
     # 5) agregação robusta AGORA sobre os vetores finais
@@ -608,13 +641,13 @@ def compute_width(
     })
 
     # se nada válido, saia
-    if (np.isnan(med_g) or len(widths_geom_final) < min_valid_rows) and \
-    (np.isnan(med_d) or len(widths_depth)     < min_valid_rows):
+    if (np.isnan(med_g) or len(widths_geom_final) < min_rows_eff) and \
+    (np.isnan(med_d) or len(widths_depth)     < min_rows_eff):
         return WidthResult(0.0, 0.0, 0)
 
     # flags de confiabilidade (agora com par_frac definido)
-    depth_reliable = (not np.isnan(med_d)) and (len(widths_depth) >= min_valid_rows) and (par_frac >= 0.6)
-    geom_reliable  = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_valid_rows)
+    depth_reliable = (not np.isnan(med_d)) and (len(widths_depth) >= min_rows_eff) and (par_frac >= 0.6)
+    geom_reliable  = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_rows_eff)
 
     _swai_log("parallax", {
         "parallax_valid_count": int(parallax_valid_count),
@@ -662,7 +695,6 @@ def compute_width(
 
     _swai_log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
     return WidthResult(float(width), float(margin), int(nrows))
-
 
 
 def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int = 6) -> np.ndarray:
