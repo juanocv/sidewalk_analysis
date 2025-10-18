@@ -23,8 +23,20 @@ from sidewalk_ai.models.base import Segmenter
 from sidewalk_ai.models.midas import MidasEstimator
 
 
+WIDTH_PARAMS = {
+    "band_mode": "adaptive",
+    "adaptive_pct": (0.60, 0.95),   # ↓ faixa mais estreita (mais perto do observador)
+    "du_range_px": (20, 220),       # ↓ corta near-perpendicular extremo
+    "parallax_range": (0.05, 0.45), # ↓ evita “paralaxe exuberante” instável
+    "continuity_min_frac": 0.75,    # ↑ exige componente dominante mais claro
+    "max_gap_cols": 40,             # ↓ menos tolerância a máscaras “partidas”
+    "min_valid_rows": 7,            # ↑ mediana mais robusta
+    "divergence_pct": 0.25,         # ↓ troca p/ geom mais cedo quando divergir
+    "use_data_driven_margin": True,
+}
+
 # --------------------------------------------------------------------------- #
-# 0)  Public result dataclass                                                  #
+# 0)  Public result dataclass                                                 #
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True, frozen=True)
 class Result:
@@ -95,8 +107,8 @@ class SidewalkPipeline:
         self,
         lat: float, lon: float,
         heading: int = 0,
-        pitch:   int = 0,               # NEW
-        fov:     int = 90,              # optional, keeps default
+        pitch:   int = 0,               
+        fov:     int = 90,              
     ) -> Result:
         req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
         img_path = self.sv.fetch(req)
@@ -135,8 +147,64 @@ class SidewalkPipeline:
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
         metric = getattr(self.depth_est, "is_metric", False)
-        width_res = compute_width(sidewalk_mask, depth_map)
+        
+        m_cov = float(sidewalk_mask.mean())
+        d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
+        print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
+                            "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
+                            "depth_metric": bool(metric)})
 
+        # --- optional runtime overrides via environment variables ---
+        import os
+        def _tuple_from_env(key, cast=float):
+            val = os.getenv(key, None)
+            if not val:
+                return None
+            try:
+                a, b = val.split(",")
+                return (cast(a.strip()), cast(b.strip()))
+            except Exception:
+                return None
+
+        kw = {}
+        band_mode = os.getenv("SWAI_BAND_MODE", None)
+        if band_mode in ("adaptive","fixed"):
+            kw["band_mode"] = band_mode
+
+        t = _tuple_from_env("SWAI_DU_RANGE", int)
+        if t: kw["du_range_px"] = t
+
+        t = _tuple_from_env("SWAI_PARALLAX_RANGE", float)
+        if t: kw["parallax_range"] = t
+
+        v = os.getenv("SWAI_CONTINUITY_MIN_FRAC", None)
+        if v is not None:
+            try: kw["continuity_min_frac"] = float(v)
+            except: pass
+
+        v = os.getenv("SWAI_MAX_GAP_COLS", None)
+        if v is not None:
+            try: kw["max_gap_cols"] = int(v)
+            except: pass
+
+        v = os.getenv("SWAI_MIN_VALID_ROWS", None)
+        if v is not None:
+            try: kw["min_valid_rows"] = int(v)
+            except: pass
+
+        v = os.getenv("SWAI_DIVERGENCE_PCT", None)
+        if v is not None:
+            try: kw["divergence_pct"] = float(v)
+            except: pass
+
+        v = os.getenv("SWAI_USE_DATA_DRIVEN_MARGIN", None)
+        if v is not None:
+            kw["use_data_driven_margin"] = v.strip() not in ("0","false","False")
+
+        params = dict(WIDTH_PARAMS)
+        #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
+        width_res = compute_width(sidewalk_mask, depth_map, **params)
+       
         #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Geometry --------------------------------------------- #

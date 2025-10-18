@@ -62,6 +62,13 @@ class OneFormerSegmenter(Segmenter):
             min_cols=30,
         ).astype(bool)
 
+        import os
+        if os.getenv("SWAI_DEBUG", "").strip().lower() not in ("", "0", "false"):
+            print("[SWAI][seg]", {
+                "mask_coverage": float(mask.mean()),
+                "raw_coverage": float(sidewalk_raw.mean())
+            })
+
         return mask, seg_map, seg_info
 
 
