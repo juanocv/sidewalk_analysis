@@ -11,7 +11,7 @@ import numpy as np
 
 # --- DEBUG HELPERS ---
 def _swai_debug_on():
-    return True
+    return False
 
 def _swai_log(tag, payload):
     if not _swai_debug_on():
