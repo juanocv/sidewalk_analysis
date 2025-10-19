@@ -51,6 +51,9 @@ pipe       = sw.SidewalkPipeline(segmenter=segmenter,
 if args.image:
     from sidewalk_ai.core.pipeline import SidewalkPipeline
     res = SidewalkPipeline._analyse_path(pipe, args.image.resolve())
+elif args.lat is not None and args.lon is not None:
+    lat, lon = args.lat, args.lon
+    res = pipe.analyse_coords(lat, lon, pitch=-10)
 else:
     if not args.address:
         raise ValueError("address or --image required")

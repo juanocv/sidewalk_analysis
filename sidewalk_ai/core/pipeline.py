@@ -4,8 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Literal
 
+from matplotlib import pyplot as plt
 import numpy as np
 
 from sidewalk_ai.processing.refinement import refine_sidewalk_mask
@@ -15,6 +16,7 @@ from sidewalk_ai.models._obstacles import extract_obstacles
 from sidewalk_ai.processing.geometry import (
      WidthResult,
      ClearanceResult,
+     _has_two_curbs,
      compute_width,
      compute_clearances,
  )
@@ -98,9 +100,163 @@ class SidewalkPipeline:
         pitch:   int = 0,               # NEW
         fov:     int = 90,              # optional, keeps default
     ) -> Result:
-        req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
-        img_path = self.sv.fetch(req)
-        return self._analyse_path(img_path)
+        center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+        self._generate_heading_ranges(center_heading)
+        left_headings, right_headings = self._generate_heading_ranges(center_heading)
+
+        left_estimates = []
+        right_estimates = []
+        for heading in left_headings:
+            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+            img_path = self.sv.fetch(req)
+            plt.imshow(read_rgb(img_path))
+            plt.show()
+            left_estimates.append(self._analyse_path(img_path))
+
+        for heading in right_headings:
+            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+            img_path = self.sv.fetch(req)
+            plt.imshow(read_rgb(img_path))
+            plt.show()
+            right_estimates.append(self._analyse_path(img_path))
+
+        median_left = self._calculate_median_width(left_estimates)
+        median_right = self._calculate_median_width(right_estimates)
+
+        return left_estimates, right_estimates
+    
+    def _calculate_median_width(
+        self,
+        estimates: Sequence[Result],
+    ) -> Result:
+        pass  # TODO: implement median width calculation from multiple estimates
+
+    def _find_street_center(
+        self,
+        lat: float | None = None,
+        lon: float | None = None,
+        address: str | None = None,
+        pitch: int = 0,
+        fov: int = 90,
+        test_angles: list[int] | None = None,
+    ) -> int | None:
+        """
+        Find the heading that shows the street center (two sidewalks visible).
+        
+        Parameters
+        ----------
+        lat, lon : float
+            Location coordinates
+        pitch, fov : int
+            Camera parameters
+        test_angles : list[int], optional
+            Headings to test. Defaults to [0, 90, 180, 270]
+        
+        Returns
+        -------
+        int or None
+            Best heading showing street center, or None if not found
+        """
+        if test_angles is None:
+            test_angles = [0, 90, 180, 270]
+        
+        print(f"Testing {len(test_angles)} angles to find street center...")
+        
+        best_heading = None
+        best_score = -1
+        
+        for heading in test_angles:
+            try:
+                # Fetch image for this heading
+                if address is None:
+                    req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+                    img_path = self.sv.fetch(req)
+                    img_rgb = read_rgb(img_path)
+                elif lat is None or lon is None:
+                    img_path = self.sv.fetch(address)
+                    img_rgb = read_rgb(img_path)
+
+                # Quick segmentation (just need the mask)
+                out = self.segmenter.segment(img_rgb)
+                sidewalk_mask = out[0]
+                
+                # Handle ensemble outputs
+                if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
+                    sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
+                
+                # Check if we have two curbs (street center indicator)
+                has_two = _has_two_curbs(sidewalk_mask, min_gap_px=50)
+                
+                # Score this heading
+                if has_two:
+                    # Additional scoring: prefer more balanced sidewalk coverage
+                    cols = np.where(sidewalk_mask)[1]
+                    if cols.size > 0:
+                        left_coverage = np.sum(cols < sidewalk_mask.shape[1] // 2)
+                        right_coverage = np.sum(cols >= sidewalk_mask.shape[1] // 2)
+                        balance = min(left_coverage, right_coverage) / max(left_coverage, right_coverage, 1)
+                        score = balance
+                    else:
+                        score = 0.5
+                    
+                    print(f"Heading {heading}°: Center found (score={score:.2f})")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_heading = heading
+                else:
+                    print(f"Heading {heading}°: No center detected")
+                    
+            except Exception as e:
+                print(f"Heading {heading}°: Error - {e}")
+                continue
+        
+        if best_heading is not None:
+            print(f"Best center heading: {best_heading}° (score={best_score:.2f})")
+        else:
+            print("No street center found in test angles")
+        
+        plt.imshow(img_rgb)
+        plt.show()
+        return best_heading
+
+    def _generate_heading_ranges(
+        self,
+        center_heading: int,
+        angle_step: int = 15,
+        max_deviation: int = 60,
+    ) -> tuple[list[int], list[int]]:
+        """
+        Generate heading ranges for left and right sides from center.
+        
+        Parameters
+        ----------
+        center_heading : int
+            The heading showing street center (from find_street_center)
+        angle_step : int
+            Step size in degrees for generating headings
+        max_deviation : int
+            Maximum deviation from center in each direction
+        
+        Returns
+        -------
+        left_headings, right_headings : tuple[list[int], list[int]]
+            Lists of headings for left and right sides
+        """
+        # Left side: subtract angles (counterclockwise)
+        left_headings = [
+            (center_heading - angle) % 360
+            for angle in range(angle_step, max_deviation + angle_step, angle_step)
+        ]
+        
+        # Right side: add angles (clockwise)
+        right_headings = [
+            (center_heading + angle) % 360
+            for angle in range(angle_step, max_deviation + angle_step, angle_step)
+        ]
+        
+        return left_headings, right_headings
+
 
     # ------------------------------------------------------------------ #
     # Core implementation (private)                                      #

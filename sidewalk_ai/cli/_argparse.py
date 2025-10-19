@@ -32,4 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Verbose console + composite debug image")
     parser.add_argument("--outdir", type=Path, default=Path("debug_out"),
                         help="Folder where debug PNGs are written")
+    parser.add_argument("--lat", type=float, default=None,
+                        help="Latitude for coordinate-based analysis")
+    parser.add_argument("--lon", type=float, default=None,
+                        help="Longitude for coordinate-based analysis")
     return parser
