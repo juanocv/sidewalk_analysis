@@ -146,10 +146,11 @@ class SidewalkPipeline:
 
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
-        metric = getattr(self.depth_est, "is_metric", False)
         
-        m_cov = float(sidewalk_mask.mean())
-        d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
+        #metric = getattr(self.depth_est, "is_metric", False)
+        #m_cov = float(sidewalk_mask.mean())
+        #d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
+        
         #print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
         #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
         #                    "depth_metric": bool(metric)})
