@@ -150,10 +150,11 @@ class SidewalkPipeline:
         
         m_cov = float(sidewalk_mask.mean())
         d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
-        print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
-                            "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
-                            "depth_metric": bool(metric)})
+        #print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
+        #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
+        #                    "depth_metric": bool(metric)})
 
+        '''
         # --- optional runtime overrides via environment variables ---
         import os
         def _tuple_from_env(key, cast=float):
@@ -201,6 +202,9 @@ class SidewalkPipeline:
         if v is not None:
             kw["use_data_driven_margin"] = v.strip() not in ("0","false","False")
 
+        '''
+
+        # -------- Width ------------------------------------------------ #
         params = dict(WIDTH_PARAMS)
         #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
         width_res = compute_width(sidewalk_mask, depth_map, **params)

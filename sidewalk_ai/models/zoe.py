@@ -106,10 +106,10 @@ class ZoeDepthEstimator:
         depth = np.nan_to_num(depth, nan=5.0, posinf=100.0, neginf=0.1)
 
         # (opcional) log:
-        print("[SWAI][zoe]", {
-            "variant": self._variant,
-            "depth_min": float(depth.min()),
-            "depth_med": float(np.median(depth)),
-            "depth_max": float(depth.max())
-        })
+        #print("[SWAI][zoe]", {
+        #    "variant": self._variant,
+        #    "depth_min": float(depth.min()),
+        #    "depth_med": float(np.median(depth)),
+        #    "depth_max": float(depth.max())
+        #})
         return depth
