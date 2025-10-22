@@ -15,6 +15,12 @@ import numpy as np
 from scipy import ndimage
 from scipy.ndimage import median_filter
 
+
+# Exception raised when refinement (two-line infill) cannot be completed
+class RefinementError(Exception):
+    """Raised when two-line infill / refinement cannot be completed."""
+    pass
+
 # --------------------------------------------------------------------------- #
 # 0)  Row-wise edge interpolation  (≈ original rowwise_fill_sidewalk)         #
 # --------------------------------------------------------------------------- #
@@ -460,11 +466,27 @@ def refine_sidewalk_mask(
     #cv2.imwrite("debug_4_holefill.png", (keep * 255).astype(np.uint8))
 
     # 5) two-line infill (parallel curbs)
-    mask, (top_line, bot_line) = fill_between_independent_lines(
-        keep,
-        **(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200)),
-        return_lines=True,
-    )
+    try:
+        mask, (top_line, bot_line) = fill_between_independent_lines(
+            keep,
+            **(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200)),
+            return_lines=True,
+        )
+    except Exception as exc:
+        # When this fails it typically means the mask is not suitable for
+        # the two-line infill (e.g. no clear top/bottom runs). Surface a
+        # clear error so callers can decide to skip this image/heading.
+        msg = f"two-line infill failed: {exc}"
+        # Attempt to call a project-level logger if available, but avoid
+        # referencing a name that may not exist at import time.
+        _logger = globals().get("_swai_log")
+        if callable(_logger):
+            try:
+                _logger("refine_error", {"message": msg})
+            except Exception:
+                pass
+        # Raise a specific exception so callers can catch it explicitly
+        raise RefinementError(msg)
 
     mask = remove_new_pixels_outside_main_segment_x(mask, reference=keep, max_gap=2, pad_px=2)
     
