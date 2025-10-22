@@ -90,8 +90,27 @@ class SidewalkPipeline:
         """
         The call your **web app** or CLI will use 99 % of the time.
         """
-        img_path = self.sv.fetch(address)
-        return self._analyse_path(img_path)
+        lat, lon = self.sv.geocode(address)
+        center_heading = self._find_street_center(lat=lat, lon=lon)
+        self._generate_heading_ranges(center_heading)
+        left_headings, right_headings = self._generate_heading_ranges(center_heading)
+
+        left_estimates = []
+        right_estimates = []
+        for heading in left_headings:
+            req = ImageRequest(lat, lon, heading=heading)
+            img_path = self.sv.fetch(req)
+            left_estimates.append(self._analyse_path(img_path))
+
+        for heading in right_headings:
+            req = ImageRequest(lat, lon, heading=heading)
+            img_path = self.sv.fetch(req)
+            right_estimates.append(self._analyse_path(img_path))
+
+        median_left = self._calculate_median_width(left_estimates)
+        median_right = self._calculate_median_width(right_estimates)
+
+        return left_estimates, right_estimates
 
     def analyse_coords(
         self,
@@ -109,15 +128,11 @@ class SidewalkPipeline:
         for heading in left_headings:
             req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
-            plt.imshow(read_rgb(img_path))
-            plt.show()
             left_estimates.append(self._analyse_path(img_path))
 
         for heading in right_headings:
             req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
-            plt.imshow(read_rgb(img_path))
-            plt.show()
             right_estimates.append(self._analyse_path(img_path))
 
         median_left = self._calculate_median_width(left_estimates)
@@ -160,7 +175,7 @@ class SidewalkPipeline:
         if test_angles is None:
             test_angles = [0, 90, 180, 270]
         
-        print(f"Testing {len(test_angles)} angles to find street center...")
+        print(f"Testing {len(test_angles)} angles to find street center")
         
         best_heading = None
         best_score = -1
@@ -216,15 +231,13 @@ class SidewalkPipeline:
         else:
             print("No street center found in test angles")
         
-        plt.imshow(img_rgb)
-        plt.show()
         return best_heading
 
     def _generate_heading_ranges(
         self,
         center_heading: int,
-        angle_step: int = 15,
-        max_deviation: int = 60,
+        angle_step: int = 10,
+        max_deviation: int = 40,
     ) -> tuple[list[int], list[int]]:
         """
         Generate heading ranges for left and right sides from center.
