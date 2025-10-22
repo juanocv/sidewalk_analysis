@@ -471,4 +471,6 @@ def refine_sidewalk_mask(
     #print(f" After two-line infill: {mask.sum()} px positive")
     #cv2.imwrite("debug_5_twoline.png", (mask * 255).astype(np.uint8))
 
+    #print("[SWAI][refine]", {"pos_px_after_refine": int(mask.sum())})
+
     return mask, (top_line, bot_line)
