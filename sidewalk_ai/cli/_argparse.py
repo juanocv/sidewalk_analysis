@@ -36,4 +36,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Latitude for coordinate-based analysis")
     parser.add_argument("--lon", type=float, default=None,
                         help="Longitude for coordinate-based analysis")
+    # Multi-view vs single-view control (CLI default: multi-view)
+    parser.add_argument("--multi-view", dest="multi_view", action="store_true",
+                        help="Run multi-angle analysis (default)")
+    parser.add_argument("--single-view", dest="multi_view", action="store_false",
+                        help="Run single-frame analysis using heading/pitch/fov")
+    parser.set_defaults(multi_view=True)
+
+    # Single-view parameters
+    parser.add_argument("--heading", type=int, default=0,
+                        help="Heading for single-view mode (0-359)")
+    parser.add_argument("--pitch", type=int, default=0,
+                        help="Pitch for single-view mode (-90 to 90)")
+    parser.add_argument("--fov", type=int, default=90,
+                        help="Field-of-view for single-view mode (10-120)")
+    parser.add_argument("--return-mask", action="store_true",
+                        help="Return mask and overlay images for single-view runs")
     return parser
