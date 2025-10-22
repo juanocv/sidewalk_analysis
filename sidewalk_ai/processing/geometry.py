@@ -11,7 +11,7 @@ import numpy as np
 
 # --- DEBUG HELPERS ---
 def _swai_debug_on():
-    return False
+    return False # set via env var or CLI in future
 
 def _swai_log(tag, payload):
     if not _swai_debug_on():
@@ -258,27 +258,68 @@ def compute_width(
     "fx": float(fx), "fy": float(fy), "cx": float(cx), "cy": float(cy), "v_h": float(v_h)
     })
 
-    # 1) choose band
+    # 1) choose band  ──────────────────────────────────────────────────────────────
     if band_mode == "adaptive":
         ys_mask = np.where(sidewalk)[0]
         if ys_mask.size >= 30:  # enough evidence
-            # constrain to rows below the horizon + margin
-            ymin = max(int(np.percentile(ys_mask, adaptive_pct[0] * 100)), int(v_h) + 5)
-            ymax = max(ymin + 1, int(np.percentile(ys_mask, adaptive_pct[1] * 100)))
+            yq_lo = int(np.percentile(ys_mask, adaptive_pct[0] * 100))  # ~p60
+            yq_hi = int(np.percentile(ys_mask, adaptive_pct[1] * 100))  # ~p95
+            ymin  = max(yq_lo, int(v_h) + 5)
+            # altura mínima da banda (dinâmica: 5% de H, mas nunca <12 px)
+            MIN_BAND_PX = max(12, int(0.05 * H))
+            ymax  = max(ymin + MIN_BAND_PX, yq_hi)  # ← antes era ymin + 1
             y0, y1 = ymin, min(H, ymax)
         else:
             y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
             y0 = max(y0, int(v_h) + 5)
+            # também respeite a altura mínima aqui
+            MIN_BAND_PX = max(12, int(0.05 * H))
+            if (y1 - y0) < MIN_BAND_PX:
+                y1 = min(H, y0 + MIN_BAND_PX)
     else:
         y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
         y0 = max(y0, int(v_h) + 5)
+        MIN_BAND_PX = max(12, int(0.05 * H))
+        if (y1 - y0) < MIN_BAND_PX:
+            y1 = min(H, y0 + MIN_BAND_PX)
+
+    # se por qualquer motivo a banda ainda ficou pequena, expanda simetricamente
+    if (y1 - y0) < MIN_BAND_PX:
+        deficit = MIN_BAND_PX - (y1 - y0)
+        grow = (deficit + 1) // 2
+        y0 = max(int(v_h) + 5, y0 - grow)
+        y1 = min(H, y1 + grow)
+        if (y1 - y0) < MIN_BAND_PX:  # último reforço
+            y1 = min(H, y0 + MIN_BAND_PX)
 
     band = sidewalk[y0:y1].astype(np.uint8)
     band_cov = float(band.sum()) / float(band.size) if band.size else 0.0
-    # normaliza para [0,1] na faixa de interesse (≈ 10% a 35% de coverage)
-    cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))  # 0↔1 ~ [10%,35%]
+    cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))
 
-    _swai_log("band", {"mode": band_mode, "y0": int(y0), "y1": int(y1)})
+    _swai_log("band", {
+        "mode": band_mode, "y0": int(y0), "y1": int(y1),
+        "height": int(y1 - y0), "cov": band_cov
+    })
+
+    # ── DU gating adaptativo ─────────────────────────────────────────────────────
+    DU_LO_FLOOR = 6  # não deixe Δu exigir mais que isso em casos extremos
+    du_lo_base, du_hi = du_range_px  # ex.: (20, 220)
+
+    # prior simples de Δu a partir de um Z "saudável"
+    Z_soft = min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL) if DEPTH_MED is not None else 5.0
+    du_prior = (float(fx) / max(1.0, Z_soft)) * 2.1  # px para ~2.1m
+
+    # quando a cobertura é baixa (cov_norm→0), aceite Δu menor
+    du_lo_eff = int(np.clip(
+        np.interp(cov_norm, [0.0, 0.5, 1.0],
+                [max(DU_LO_FLOOR, 0.35*du_prior), max(10.0, 0.5*du_prior), du_lo_base]),
+        DU_LO_FLOOR, du_lo_base
+    ))
+
+    _swai_log("du_gating", {
+        "du_lo_eff": int(du_lo_eff), "du_hi": int(du_hi),
+        "du_prior": float(du_prior), "cov_norm": float(cov_norm)
+    })
 
     if y0 >= y1 - 5:
         return WidthResult(0.0, 0.0, 0)
@@ -324,7 +365,7 @@ def compute_width(
 
 
     # 4) per-row computation with gating
-    du_lo, du_hi = du_range_px
+    du_hi = du_range_px[1]
     par_lo, par_hi = parallax_range
 
     v_rows = np.arange(y0, y1)
@@ -365,7 +406,7 @@ def compute_width(
 
         was_near_perp = (du > du_hi)
         rows_seen += 1
-        if du < du_lo:
+        if du < du_lo_eff:
             skip_du += 1
             continue
 
@@ -506,7 +547,7 @@ def compute_width(
                 uL, uR = uL_q, uR_q
             du = uR - uL
             was_near_perp = (du > du_hi)
-            if du < du_lo:
+            if du < du_lo_eff:
                 continue
             if du > du_hi:
                 # === near-perp: traga as bordas para um DU alvo estável ===
@@ -572,7 +613,17 @@ def compute_width(
         "n_depth_rows": len(widths_depth)
     })
 
-    min_rows_eff = max(5, int(0.8 * min_valid_rows)) if band_cov < 0.15 else min_valid_rows
+    band_h = (y1 - y0)
+
+    if band_cov < 0.03:                        # banda muito rara
+        min_rows_eff = 2
+    elif band_cov < 0.08 or band_h <= MIN_BAND_PX:
+        min_rows_eff = max(3, int(0.5 * min_valid_rows))
+    elif band_cov < 0.15:
+        min_rows_eff = max(4, int(0.7 * min_valid_rows))
+    else:
+        min_rows_eff = min_valid_rows
+
 
     # fração de linhas com parallax válido (precisamos disto ANTES das flags)
     par_frac = (parallax_valid_count / max(1, total_rows_considered)) if total_rows_considered else 0.0
@@ -640,10 +691,25 @@ def compute_width(
         "iqr_d": None if np.isnan(iqr_d) else float(iqr_d),
     })
 
-    # se nada válido, saia
+    # se nada válido, saia (mas com fallback opcional de baixa confiança)
     if (np.isnan(med_g) or len(widths_geom_final) < min_rows_eff) and \
     (np.isnan(med_d) or len(widths_depth)     < min_rows_eff):
+
+        if len(widths_geom_final) >= 3:
+            width_fallback = float(np.median(widths_geom_final))
+            margin_fb = max((err_pct / 100.0) * width_fallback, 0.35 * width_fallback)
+            _swai_log("result_lowconf", {
+                "width": width_fallback, "margin": margin_fb,
+                "nrows": int(len(widths_geom_final))
+            })
+            return WidthResult(width_fallback, margin_fb, int(len(widths_geom_final)))
+
         return WidthResult(0.0, 0.0, 0)
+
+    # se nada válido, saia
+    # if (np.isnan(med_g) or len(widths_geom_final) < min_rows_eff) and \
+    # (np.isnan(med_d) or len(widths_depth)     < min_rows_eff):
+    #    return WidthResult(0.0, 0.0, 0)
 
     # flags de confiabilidade (agora com par_frac definido)
     depth_reliable = (not np.isnan(med_d)) and (len(widths_depth) >= min_rows_eff) and (par_frac >= 0.6)

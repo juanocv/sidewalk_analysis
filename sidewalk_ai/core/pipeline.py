@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 
 from sidewalk_ai.processing.refinement import refine_sidewalk_mask
+from sidewalk_ai.processing.refinement import RefinementError
 from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.io.streetview import StreetViewClient, ImageRequest
 from sidewalk_ai.models._obstacles import extract_obstacles
@@ -48,8 +49,10 @@ class Result:
     sidewalk_mask: np.ndarray          # H×W  uint8  (0/1)
     refined_mask: np.ndarray | None = None  # H×W  uint8  (0/1)
     seg_map: np.ndarray | None = None  # panoptic id map (optional)
+    seg_info: list | None = None       # list of SegmentInfo tuples (id,name)
     img_path: Path | None = None
     rgb_image: np.ndarray | None = None  # H×W×3  uint8 (RGB)
+    obstacles: list[tuple[str, np.ndarray]] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -104,7 +107,6 @@ class SidewalkPipeline:
         """
         lat, lon = self.sv.geocode(address)
         center_heading = self._find_street_center(lat=lat, lon=lon)
-        self._generate_heading_ranges(center_heading)
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
 
         left_estimates = []
@@ -132,7 +134,6 @@ class SidewalkPipeline:
         fov:     int = 90,              
     ) -> Result:
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
-        self._generate_heading_ranges(center_heading)
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
 
         left_estimates = []
@@ -140,12 +141,20 @@ class SidewalkPipeline:
         for heading in left_headings:
             req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
-            left_estimates.append(self._analyse_path(img_path))
+            try:
+                left_estimates.append(self._analyse_path(img_path))
+            except RefinementError as e:
+                print(f"Skipping heading {heading} (left): {e}")
+                continue
 
         for heading in right_headings:
             req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
-            right_estimates.append(self._analyse_path(img_path))
+            try:
+                right_estimates.append(self._analyse_path(img_path))
+            except RefinementError as e:
+                print(f"Skipping heading {heading} (right): {e}")
+                continue
 
         median_left = self._calculate_median_width(left_estimates)
         median_right = self._calculate_median_width(right_estimates)
@@ -248,8 +257,9 @@ class SidewalkPipeline:
     def _generate_heading_ranges(
         self,
         center_heading: int,
-        angle_step: int = 10,
-        max_deviation: int = 40,
+        initial_offset: int = 40,
+        angle_step: int = 15,
+        max_deviation: int = 90,
     ) -> tuple[list[int], list[int]]:
         """
         Generate heading ranges for left and right sides from center.
@@ -268,17 +278,22 @@ class SidewalkPipeline:
         left_headings, right_headings : tuple[list[int], list[int]]
             Lists of headings for left and right sides
         """
-        # Left side: subtract angles (counterclockwise)
-        left_headings = [
-            (center_heading - angle) % 360
-            for angle in range(angle_step, max_deviation + angle_step, angle_step)
-        ]
-        
-        # Right side: add angles (clockwise)
-        right_headings = [
-            (center_heading + angle) % 360
-            for angle in range(angle_step, max_deviation + angle_step, angle_step)
-        ]
+        # Start at an initial offset (e.g., 40°) then step by angle_step up to
+        # max_deviation. This avoids sampling headings that are too near the
+        # street-center view which may still show both curbs and add noise.
+        def seq_offsets(sign: int) -> list[int]:
+            offsets = []
+            angle = initial_offset
+            while angle <= max_deviation:
+                offsets.append(sign * angle)
+                angle += angle_step
+            return offsets
+
+        # Left side: subtract offsets (counterclockwise)
+        left_headings = [((center_heading + off) % 360) for off in seq_offsets(-1)]
+
+        # Right side: add offsets (clockwise)
+        right_headings = [((center_heading + off) % 360) for off in seq_offsets(1)]
         
         return left_headings, right_headings
 
@@ -298,6 +313,9 @@ class SidewalkPipeline:
         elif len(out) == 4:
             sidewalk_mask, seg_map, seg_info, obstacles = out # for deeplab
 
+        #print(f"Segmentation map {seg_map}")
+        #print(f"Segmentation info {seg_info}")
+
         # Some back-ends (ensemble) may return a tuple of masks
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
@@ -308,9 +326,12 @@ class SidewalkPipeline:
         refined_mask, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_mask)
         #print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
 
-        # -------- Obstacle Extraction -------- #
-        if not obstacles:
+        # -------- Obstacle Extraction (base-only) -------- #
+        # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
+        # do mapa panóptico – robusto contra copas coladas:
+        if seg_map is not None and seg_info is not None:
             obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
+        # caso extremo: sem panoptic disponível, mantém os do segmenter
         #print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
 
         # -------- Depth ------------------------------------------------ #
@@ -379,6 +400,7 @@ class SidewalkPipeline:
         #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
         width_res = compute_width(sidewalk_mask, depth_map, **params)
        
+        #print(f"Width estimation {width_res}")
         #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Geometry --------------------------------------------- #
@@ -404,6 +426,8 @@ class SidewalkPipeline:
             sidewalk_mask=sidewalk_mask,
             refined_mask=refined_mask,
             seg_map=seg_map,
+            seg_info=seg_info,
             img_path=img_path,
-            rgb_image=img_rgb
+            rgb_image=img_rgb,
+            obstacles=obstacles
         )

@@ -3,6 +3,7 @@ from typing import Optional, Sequence, Tuple
 from matplotlib import pyplot as plt
 import cv2, numpy as np, torch
 from pathlib import Path
+from sidewalk_ai.io.image_io import read_rgb
 from ._builder import LABEL_MAP
 from detectron2.data.catalog import MetadataCatalog
 
@@ -228,7 +229,19 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
     
 def write_debug_sheet(res, pipeline, args, segmenter):
     outdir: Path = args.outdir; outdir.mkdir(exist_ok=True, parents=True)
-    img_rgb      = pipeline._last_rgb
+    # Prefer the image stored inside the Result (if available). Fallback to
+    # res.img_path (load from disk) and finally pipeline._last_rgb.
+    img_rgb = getattr(res, 'rgb_image', None)
+    img_path_used = getattr(res, 'img_path', None)
+    if img_rgb is None and img_path_used is not None:
+        try:
+            img_rgb = read_rgb(img_path_used)
+        except Exception:
+            img_rgb = None
+    if img_rgb is None:
+        img_rgb = getattr(pipeline, '_last_rgb', None)
+    if img_rgb is None:
+        raise RuntimeError("No RGB image available to build debug sheet")
     img_bgr      = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
     h, w         = img_bgr.shape[:2]
     tiles        = []
@@ -236,28 +249,68 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # 1 panoptic overlay + legend
     is_ensemble = "+" in args.seg
     
-    # Get detailed segmentation info for better visualization
-    seg_map_debug, segments_info_debug = get_segment_info_for_debug(segmenter, img_rgb)
-    
-    # Use debug info if available, otherwise fallback to result
-    if seg_map_debug is not None:
-        seg_map_to_use = seg_map_debug
-        segments_info_to_use = segments_info_debug
-    else:
-        seg_map_to_use = res.seg_map
-        segments_info_to_use = getattr(res, "seg_info", [])
+    # Prefer segmentation info already computed by the pipeline (attached
+    # to the Result). Only recompute segmentation for debug if the Result
+    # doesn't contain a panoptic map.
+    seg_map_to_use = getattr(res, 'seg_map', None)
+    segments_info_to_use = getattr(res, 'seg_info', None) or []
+    if seg_map_to_use is None:
+        try:
+            seg_map_debug, segments_info_debug = get_segment_info_for_debug(segmenter, img_rgb)
+            if seg_map_debug is not None:
+                seg_map_to_use = seg_map_debug
+                segments_info_to_use = segments_info_debug
+        except Exception:
+            # fall back to whatever the Result contains (likely None)
+            pass
     
     if seg_map_to_use is not None:
-        seg = seg_map_to_use; uniq = np.unique(seg); lut = make_palette()
+        seg = seg_map_to_use
+        # Ensure seg map matches image size. If not, resize with nearest
+        # neighbour so overlays line up with the refined mask and image.
+        if seg.shape != img_rgb.shape[:2]:
+            try:
+                print(f"[debug_viz] resizing seg_map {seg.shape} -> {img_rgb.shape[:2]}")
+                seg = cv2.resize(seg.astype(np.int32), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+            except Exception:
+                # fallback: attempt to use original seg (may misalign)
+                pass
+        uniq = np.unique(seg); lut = make_palette()
         overlay = cv2.addWeighted(img_bgr,.35,lut[seg%256],.65,0)
         legend  = np.full((len(uniq)*22+10,200,3),255,np.uint8)  # Increased width for longer labels
 
         for i,sid in enumerate(uniq):
-            label_name = _label(sid, segmenter, segments_info_to_use)
-            cv2.rectangle(legend,(5,i*22+5),(25,i*22+20),lut[sid].tolist(),-1)
-            cv2.putText(legend,label_name[:20],(30,i*22+18),  # Increased max length
-                        cv2.FONT_HERSHEY_SIMPLEX,.5,(0,0,0),1)
-        
+            label_name = _label(int(sid), segmenter, segments_info_to_use)
+            color = lut[int(sid) % 256].tolist()
+            cv2.rectangle(legend, (5, i*22+5), (25, i*22+20), color, -1)
+            cv2.putText(
+                legend,
+                label_name[:20],
+                (30, i*22+18),  # Increased max length
+                cv2.FONT_HERSHEY_SIMPLEX,
+                .5,
+                (0, 0, 0),
+                1,
+            )
+        # >>> NOVO: desenhar rótulos de obstáculos (tree#1, pole#ins7:0, etc.)
+        obs_for_viz = getattr(res, "obstacles", None)
+        if obs_for_viz:
+            for (olabel, omask) in obs_for_viz:
+                m = omask.astype(bool)
+                if not m.any():
+                    continue
+                ys, xs = np.nonzero(m)
+                cy, cx = int(np.mean(ys)), int(np.mean(xs))
+                # contorno fino para destacar o obstáculo
+                cont_img = (m.astype(np.uint8) * 255)
+                cnts, _ = cv2.findContours(cont_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(overlay, cnts, -1, (255, 255, 255), 1, lineType=cv2.LINE_AA)
+                # rótulo com pequena sombra para legibilidade
+                cv2.putText(overlay, olabel, (cx, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3, cv2.LINE_AA)
+                cv2.putText(overlay, olabel, (cx, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+
         if legend.shape[0]<h:
             legend=np.vstack([legend,np.full((h-legend.shape[0],legend.shape[1],3),255,np.uint8)])
         tiles.append(add_title(np.hstack([overlay,legend]),"Panoptic overlay"))
@@ -271,8 +324,10 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             backend_names = segmenter.backend_name.split("+")
             target_a = LABEL_MAP.get(backend_names[0], ["sidewalk"])
             target_b = LABEL_MAP.get(backend_names[1], ["sidewalk"])
-            m1 = segmenter.base.a.segment(img_rgb, target_label=target_a)[0]
-            m2 = segmenter.base.b.segment(img_rgb, target_label=target_b)[0]
+            out1 = segmenter.base.a.segment(img_rgb, target_label=target_a)
+            out2 = segmenter.base.b.segment(img_rgb, target_label=target_b)
+            m1 = out1[0] if len(out1) >= 1 else None
+            m2 = out2[0] if len(out2) >= 1 else None
 
             # Prepare mask tiles in the desired order
             mask_tiles = []
@@ -324,7 +379,13 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- HEADER ------------------------------------------------
     hdr_h = 40
     header = np.full((hdr_h, grid.shape[1], 3), 30, np.uint8)
-    text = f"{args.image.name}   |   seg={args.seg}   |   depth={depth_model_name}"
+    # Build a sensible image name for header/filename
+    img_label = None
+    if img_path_used is not None:
+        img_label = getattr(img_path_used, 'name', None)
+    if img_label is None:
+        img_label = getattr(getattr(args, 'image', None), 'name', None) or "image"
+    text = f"{img_label}   |   seg={args.seg}   |   depth={depth_model_name}"
     cv2.putText(header, text, (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
     
@@ -341,8 +402,13 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- COMPOSE ----------------------------------------------
     composite = np.vstack([header, grid, footer])
 
-    cv2.imwrite(str(outdir/f"{args.image.stem}_{args.seg.replace('+', '_')}_{depth_model_name.lower().replace('-', '_')}.png"),
-                cv2.cvtColor(composite,cv2.COLOR_RGB2BGR))
+    stem = None
+    if img_path_used is not None:
+        stem = getattr(img_path_used, 'stem', None)
+    if stem is None:
+        stem = getattr(getattr(args, 'image', None), 'stem', None) or img_label.replace('.', '_')
+    fname = f"{stem}_{args.seg.replace('+', '_')}_{depth_model_name.lower().replace('-', '_')}.png"
+    cv2.imwrite(str(outdir / fname), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
     
 def plot_clearance_overlay_debug(
     image: np.ndarray,

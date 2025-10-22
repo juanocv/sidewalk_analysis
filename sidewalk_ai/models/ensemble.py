@@ -25,7 +25,19 @@ class EnsembleSegmenter(Segmenter):
         self.method = method
 
     def segment(self, img_rgb, target_label="sidewalk", *, device=None):
-        m1, _, _ = self.a.segment(img_rgb, target_label)
-        m2, _, _ = self.b.segment(img_rgb, target_label)
+        out1 = self.a.segment(img_rgb, target_label)
+        out2 = self.b.segment(img_rgb, target_label)
+        # normalize to (mask, seg_map, seg_info, obstacles)
+        if len(out1) == 3:
+            m1, sm1, si1 = out1
+            obs1 = []
+        else:
+            m1, sm1, si1, obs1 = out1
+        if len(out2) == 3:
+            m2, sm2, si2 = out2
+            obs2 = []
+        else:
+            m2, sm2, si2, obs2 = out2
         fuse = m1 | m2 if self.method == "or" else m1 & m2
-        return fuse, None, None
+        # we don't have a meaningful seg_map/seg_info for the fused result
+        return fuse, None, None, []
