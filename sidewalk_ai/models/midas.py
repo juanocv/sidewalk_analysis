@@ -48,7 +48,6 @@ class MidasEstimator:
                 ),
             ]
         )
-
         
         # depth values are *relative* → we must still fit a scale afterwards
         is_metric = False

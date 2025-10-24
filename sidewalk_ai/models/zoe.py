@@ -78,64 +78,38 @@ class ZoeDepthEstimator:
         
         # Inference with proper error handling
         with torch.no_grad():
-            try:
-                # Use the model's infer method
-                depth = self.model.infer(bat)
-                
-                # Handle different return formats
-                if isinstance(depth, dict):
-                    # Some models return a dict with 'metric_depth' key
-                    depth = depth.get('metric_depth', depth.get('depth', depth))
-                
-                # Extract the depth map
-                if isinstance(depth, (list, tuple)):
-                    depth = depth[0]
-                
-                # Convert to numpy
-                if hasattr(depth, 'squeeze'):
-                    depth = depth.squeeze()
-                
-                depth = depth.cpu().detach().numpy()
-                
-                # Handle different tensor shapes
-                if depth.ndim == 3 and depth.shape[0] == 1:
-                    depth = depth.squeeze(0)
-                elif depth.ndim == 4:
-                    depth = depth.squeeze(0).squeeze(0)
-                
-            except Exception as e:
-                print(f"ZoeDepth inference error: {e}")
-                # Fallback to a simple forward pass
-                try:
-                    depth = self.model(bat)
-                    if isinstance(depth, dict):
-                        depth = depth.get('metric_depth', depth.get('depth', list(depth.values())[0]))
-                    depth = depth.squeeze().cpu().detach().numpy()
-                except Exception as e2:
-                    print(f"ZoeDepth fallback failed: {e2}")
-                    # Return a dummy depth map as last resort
-                    H, W = img_rgb.shape[:2]
-                    return np.ones((H, W), dtype=np.float32) * 5.0
+            out = self.model.infer(bat)               # UMA chamada
+            # Alguns variantes retornam dict com 'metric_depth'
+            if isinstance(out, dict):
+                depth = out.get('metric_depth', out.get('depth', None))
+                if depth is None:
+                    # Se só veio 'inv_depth' (raro), inverta UMA vez aqui
+                    inv = out.get('inv_depth', None)
+                    if inv is None:
+                        raise RuntimeError("ZoeDepth returned unexpected dict keys")
+                    depth = 1.0 / (inv + 1e-8)
+            else:
+                # Pode vir como tensor direto
+                depth = out
 
-        inv = self.model.infer(bat)[0].squeeze(0).cpu().detach().numpy()
-        depth = 1.0 / (inv + 1e-8)
+            # Tensor -> numpy
+            depth = depth.squeeze()
+            depth = depth.detach().cpu().numpy()
 
-        # Resize to match input dimensions
+        # redimensiona, clampa e sanitiza (como você já faz)
         H, W = img_rgb.shape[:2]
         if depth.shape != (H, W):
             depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
 
-        # Post-process depth values
         depth = depth.astype(np.float32)
-        
-        # Clamp extreme values that might cause issues
         depth = np.clip(depth, 0.1, 100.0)
-        
-        # Handle invalid values
         depth = np.nan_to_num(depth, nan=5.0, posinf=100.0, neginf=0.1)
 
-        # print("depth  min / max / median:", depth.min(),
-        #                               depth.max(),
-        #                               np.median(depth))
-        
+        # (opcional) log:
+        #print("[SWAI][zoe]", {
+        #    "variant": self._variant,
+        #    "depth_min": float(depth.min()),
+        #    "depth_med": float(np.median(depth)),
+        #    "depth_max": float(depth.max())
+        #})
         return depth

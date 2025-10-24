@@ -8,6 +8,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 import sidewalk_ai as sw
 from sidewalk_ai.models.factory import build_depth 
+from sidewalk_ai.api.request import from_api_req, run_pipeline
 
 # Map ZoeDepth variant names to their canonical forms
 NAME_MAP = {
@@ -86,6 +87,12 @@ class AddressReq(BaseModel):
     pitch:   int = Field(0,  ge=-90, le=90)
     fov:     int = Field(90, ge=10,  le=120)
 
+    # Multi-angle vs single-angle control. If true, run the
+    # multi-angle (address-mode) analysis which samples several
+    # headings around the street center. If false, the request will
+    # perform a single-angle analysis using the provided heading.
+    multi_view: bool = Field(True, description="Run multi-angle analysis (default true)")
+
 # ─── depth selection ──────────────────────────────────────────
     depth: str = Field(
         default=os.getenv("SWAI_DEPTH", "midas"),
@@ -117,13 +124,17 @@ class WidthResp(BaseModel):
     gsv_png_b64:  str  | None = None
     mask_png_b64:  str | None = None
     overlay_png_b64: str  | None = None
+    # Optional fields for multi-view responses
+    multi_metadata: dict | None = None
+    per_heading: list[dict] | None = None
+    obstacle_images: list[str] | None = None
 
 
 class ClearanceItem(BaseModel):
     label: str
-    L_m: float
-    R_m: float
-    total_m: float
+    L_m: float | None = None
+    R_m: float | None = None
+    total_m: float | None = None
     obs_width: float | None = None
 
 def _png_b64(arr: np.ndarray) -> str:
@@ -132,45 +143,28 @@ def _png_b64(arr: np.ndarray) -> str:
 # shared helper – runs the pipeline exactly once                     #
 # ------------------------------------------------------------------ #
 def _run_pipeline(req: "AddressReq") -> sw.core.pipeline.Result:
-    # pick the pre-built pipeline
+    # Build or pick the appropriate pipeline from app.state.pipes
     key = (req.depth, req.refine)
     if key not in app.state.pipes:
         raise HTTPException(400, f"Depth backend '{req.depth}' not available")
+
     pipe = app.state.pipes[key]
- 
-    # optional on-the-fly Zoe variant override
+
+    # optional on-the-fly Zoe variant override (replace depth in the selected pipe)
     if req.depth == "zoe" and req.zoe_variant:
-        # build once then cache in the dict
         v = NAME_MAP.get(req.zoe_variant, None)
         if v is None:
-            raise HTTPException(400, "zoe_variant must be one of "
-                                       f"{', '.join(VALID_ZOE)}")
+            raise HTTPException(400, "zoe_variant must be one of " f"{', '.join(VALID_ZOE)}")
         depth_obj = build_depth("zoe", variant=v)
-        app.state.pipes[key] = sw.SidewalkPipeline(
-            segmenter=pipe.segmenter,
-            depth=depth_obj,
-            streetview=app.state.sv,      
-            refine=req.refine,
-        )
+        app.state.pipes[key] = sw.SidewalkPipeline(segmenter=pipe.segmenter, depth=depth_obj, streetview=app.state.sv, refine=req.refine)
         pipe = app.state.pipes[key]
 
-        
-    # expose fallback knobs to refinement code
-    if req.fallback_scale is not None:
-        os.environ["SWAI_FALLBACK_SCALE"] = str(req.fallback_scale)
-    if req.force_fallback:
-        os.environ["SWAI_FORCE_FALLBACK"] = "1"
-
-    # address vs lat/lon logic
-    if req.lat is not None and req.lon is not None:
-        return pipe.analyse_coords(
-            lat=req.lat, lon=req.lon,
-            heading=req.heading, pitch=req.pitch, fov=req.fov
-        )
-    if req.address:
-        return pipe.analyse_address(req.address)
-
-    raise HTTPException(422, "Either address or lat+lon required")
+    # normalize request and run via helper
+    cfg = from_api_req(req)
+    try:
+        return run_pipeline(pipe, cfg)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 @app.post("/analyse", response_model=WidthResp)
 def analyse(req: AddressReq):
@@ -184,43 +178,86 @@ def analyse(req: AddressReq):
         gsv_png_b64     = None
         mask_png_b64    = None
         overlay_png_b64 = None
-
         if req.return_mask:
-            rgb_bgr = cv2.cvtColor(res.rgb_image, cv2.COLOR_RGB2BGR)
-            gsv_png_b64  = _png_b64(rgb_bgr)
+            # The pipeline may return a single Result or a tuple (left_list, right_list)
+            # In the multi-view case pick a representative Result to build images.
+            rep = None
+            if isinstance(res, tuple) and len(res) == 2:
+                left, right = res
+                # choose the middle estimate of left if available, else right
+                if left:
+                    rep = left[len(left) // 2]
+                elif right:
+                    rep = right[len(right) // 2]
+            else:
+                rep = res
 
-            mask_u8  = (res.sidewalk_mask * 255).astype("uint8")
-            mask_png_b64 = _png_b64(mask_u8)
+            if rep is not None and rep.rgb_image is not None:
+                rgb_bgr = cv2.cvtColor(rep.rgb_image, cv2.COLOR_RGB2BGR)
+                gsv_png_b64  = _png_b64(rgb_bgr)
 
-            mask_bool = res.sidewalk_mask.astype(bool)
-            # create an overlay image with the sidewalk mask
-            overlay = rgb_bgr.copy()
-            overlay[mask_bool] = (0, 255, 0)
-            overlay = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
-            overlay_png_b64 = _png_b64(overlay)
+                mask_u8  = (rep.sidewalk_mask * 255).astype("uint8")
+                mask_png_b64 = _png_b64(mask_u8)
+
+                mask_bool = rep.sidewalk_mask.astype(bool)
+                # create an overlay image with the sidewalk mask
+                overlay = rgb_bgr.copy()
+                overlay[mask_bool] = (0, 255, 0)
+                overlay = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
+                overlay_png_b64 = _png_b64(overlay)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
-    # map dataclass (slots=True) -> Pydantic model
+    # map dataclass (slots=True) -> Pydantic model for single-result
+    multi_metadata = None
+    per_heading = None
+    obstacle_images = None
+
+    if isinstance(res, dict) and 'results' in res:
+        # Rich multi-view return from helper
+        multi_metadata = res.get('metadata')
+        per_heading = res.get('per_heading')
+        obstacle_images = res.get('obstacle_images')
+        # choose a representative Result object for width/clearances
+        inner = None
+        r = res.get('results')
+        if isinstance(r, tuple) and len(r) == 2:
+            left, right = r
+            if left:
+                inner = left[len(left)//2]
+            elif right:
+                inner = right[len(right)//2]
+        elif isinstance(r, list) and r:
+            inner = r[len(r)//2]
+        else:
+            inner = None
+        if inner is None:
+            raise HTTPException(404, "No estimates found in multi-view result")
+        res_obj = inner
+    else:
+        res_obj = res
+
     clearance_items = [
         ClearanceItem(
             label=c.label,
-            L_m=c.L_m,
-            R_m=c.R_m,
-            total_m=c.total_m,
-            obs_width=c.obs_width,
+            L_m=c.L_m if hasattr(c, 'L_m') else None,
+            R_m=c.R_m if hasattr(c, 'R_m') else None,
+            total_m=c.total_m if hasattr(c, 'total_m') else None,
+            obs_width=c.obs_width if hasattr(c, 'obs_width') else None,
         )
-        for c in res.clearances
+        for c in getattr(res_obj, 'clearances', [])
     ]
 
-
     return WidthResp(
-    width_m  = res.width.width_m,
-    margin_m = res.width.margin_m,
-    clearances      = clearance_items,
-    gsv_png_b64     = gsv_png_b64,
-    mask_png_b64    = mask_png_b64,
-    overlay_png_b64 = overlay_png_b64,
+        width_m  = getattr(res_obj.width, 'width_m', 0.0),
+        margin_m = getattr(res_obj.width, 'margin_m', 0.0),
+        clearances      = clearance_items,
+        gsv_png_b64     = gsv_png_b64,
+        mask_png_b64    = mask_png_b64,
+        overlay_png_b64 = overlay_png_b64,
+        multi_metadata  = multi_metadata,
+        per_heading     = per_heading,
+        obstacle_images = obstacle_images,
     )
 
 
