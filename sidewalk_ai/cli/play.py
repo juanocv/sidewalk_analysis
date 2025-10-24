@@ -216,8 +216,8 @@ def _print_tuple_results(obj):
         for i, res in enumerate(lst):
             print(f"\n{side_name} heading #{i}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
             for c in res.clearances:
-                agg[c.label].append(c.total_m if hasattr(c, 'total_m') else c.obs_width)
-                val = c.total_m if hasattr(c, 'total_m') else c.obs_width
+                agg[c.label].append(c.obs_width)
+                val = c.obs_width 
                 L = getattr(c, 'L_m', None)
                 R = getattr(c, 'R_m', None)
                 if L is not None and R is not None:
