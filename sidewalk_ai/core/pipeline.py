@@ -101,72 +101,91 @@ class SidewalkPipeline:
     # ------------------------------------------------------------------ #
     # Convenience overloads                                              #
     # ------------------------------------------------------------------ #
-    def analyse_address(self, address: str) -> Result:
+    def analyse_address(self, address: str, *, heading: int | None = None) -> Result:
         """
-        The call your **web app** or CLI will use 99 % of the time.
+        **Single-view**: resolve (lat,lon) a partir do endereço, escolhe um heading
+        (o fornecido; caso contrário, o 'center' se disponível; senão 0°) e retorna 1 Result.
+        """
+        lat, lon = self.sv.geocode(address)
+        use_heading = heading
+        if use_heading is None:
+            center = self._find_street_center(lat=lat, lon=lon)
+            use_heading = center if center is not None else 0
+        req = ImageRequest(lat, lon, heading=int(use_heading))
+        img_path = self.sv.fetch(req)
+        return self._analyse_path(img_path)
+
+    def analyse_address_multiview(self, address: str) -> tuple[list["Result"], list["Result"]]:
+        """
+        **Multi-view**: amostra ângulos à esquerda e à direita do heading central
+        e retorna (left_results, right_results).
         """
         lat, lon = self.sv.geocode(address)
         center_heading = self._find_street_center(lat=lat, lon=lon)
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
 
-        left_estimates = []
-        right_estimates = []
-        for heading in left_headings:
-            req = ImageRequest(lat, lon, heading=heading)
+        left_estimates: list[Result] = []
+        right_estimates: list[Result] = []
+        for h in left_headings:
+            req = ImageRequest(lat, lon, heading=h)
             img_path = self.sv.fetch(req)
-            left_estimates.append(self._analyse_path(img_path))
-
-        for heading in right_headings:
-            req = ImageRequest(lat, lon, heading=heading)
+            try:
+                left_estimates.append(self._analyse_path(img_path))
+            except RefinementError as e:
+                print(f"Skipping heading {h} (left): {e}")
+        for h in right_headings:
+            req = ImageRequest(lat, lon, heading=h)
             img_path = self.sv.fetch(req)
-            right_estimates.append(self._analyse_path(img_path))
-
-        median_left = self._calculate_median_width(left_estimates)
-        median_right = self._calculate_median_width(right_estimates)
-
+            try:
+                right_estimates.append(self._analyse_path(img_path))
+            except RefinementError as e:
+                print(f"Skipping heading {h} (right): {e}")
         return left_estimates, right_estimates
 
     def analyse_coords(
         self,
         lat: float, lon: float,
-        heading: int = 0,
-        pitch:   int = 0,               
-        fov:     int = 90,              
-    ) -> Result:
+        heading: int | None = None,
+        pitch:   int = 0,
+        fov:     int = 90,
+        *,
+        multi_view: bool = False,
+    ) -> Result | tuple[list["Result"], list["Result"]]:
+        """
+        Se multi_view=False → single-view usando heading fornecido (ou center/0).
+        Se multi_view=True  → multi-view (listas por lado).
+        """
+        if not multi_view:
+            use_heading = heading
+            if use_heading is None:
+                center = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+                use_heading = center if center is not None else 0
+            req = ImageRequest(lat, lon, heading=int(use_heading), pitch=pitch, fov=fov)
+            img_path = self.sv.fetch(req)
+            return self._analyse_path(img_path)
+
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
 
-        left_estimates = []
-        right_estimates = []
-        for heading in left_headings:
-            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+        left_estimates: list[Result] = []
+        right_estimates: list[Result] = []
+        for h in left_headings:
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
                 left_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
-                print(f"Skipping heading {heading} (left): {e}")
-                continue
-
-        for heading in right_headings:
-            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+                print(f"Skipping heading {h} (left): {e}")
+        for h in right_headings:
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
                 right_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
-                print(f"Skipping heading {heading} (right): {e}")
-                continue
-
-        median_left = self._calculate_median_width(left_estimates)
-        median_right = self._calculate_median_width(right_estimates)
-
+                print(f"Skipping heading {h} (right): {e}")
         return left_estimates, right_estimates
-    
-    def _calculate_median_width(
-        self,
-        estimates: Sequence[Result],
-    ) -> Result:
-        pass  # TODO: implement median width calculation from multiple estimates
-
+    # ------------------------------------------------------------------ #
+    # Core implementation (private)                                      #
     def _find_street_center(
         self,
         lat: float | None = None,
@@ -405,7 +424,7 @@ class SidewalkPipeline:
 
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
-        print([lbl for lbl, _ in obstacles])
+        # print([lbl for lbl, _ in obstacles])
         clearances = compute_clearances(
             sidewalk_mask,
             obstacles=obstacles,            

@@ -4,6 +4,10 @@ import base64
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
+from sidewalk_ai.processing.accessibility import (
+    compute_single_view_metrics, compute_multiview_metrics
+)
 import numpy as np
 from pydantic import BaseModel, Field
 import sidewalk_ai as sw
@@ -116,6 +120,9 @@ class AddressReq(BaseModel):
 # ─── misc ──────────────────────────────────────────────────────
     return_mask: bool = False
 
+# ─── accessibility ─────────────────────────────────────────────
+    min_clear: float = Field(1.20, ge=0.0, description="Limiar de caminho livre (m) para rating ABNT/NBR 9050")
+
 
 class WidthResp(BaseModel):
     width_m: float
@@ -128,6 +135,7 @@ class WidthResp(BaseModel):
     multi_metadata: dict | None = None
     per_heading: list[dict] | None = None
     obstacle_images: list[str] | None = None
+    accessibility: dict | None = None
 
 
 class ClearanceItem(BaseModel):
@@ -234,8 +242,44 @@ def analyse(req: AddressReq):
         if inner is None:
             raise HTTPException(404, "No estimates found in multi-view result")
         res_obj = inner
+        # ----- Accessibility (MULTI) -----
+        accessibility = None
+        try:
+            left_list, right_list = res.get('results', ([], []))
+            acc = compute_multiview_metrics(left_list, right_list, min_clear_required_m=req.min_clear)
+            accessibility = {
+                "LEFT": {
+                    "min_clear_required_m": acc["LEFT"].min_clear_required_m,
+                    "global": acc["LEFT"].global_stats.__dict__,
+                    "per_type": {k: v.__dict__ for k, v in acc["LEFT"].per_type.items()},
+                },
+                "RIGHT": {
+                    "min_clear_required_m": acc["RIGHT"].min_clear_required_m,
+                    "global": acc["RIGHT"].global_stats.__dict__,
+                    "per_type": {k: v.__dict__ for k, v in acc["RIGHT"].per_type.items()},
+                },
+                "ALL": {
+                    "min_clear_required_m": acc["ALL"].min_clear_required_m,
+                    "global": acc["ALL"].global_stats.__dict__,
+                    "per_type": {k: v.__dict__ for k, v in acc["ALL"].per_type.items()},
+                },
+            }
+        except Exception:
+            accessibility = None
     else:
         res_obj = res
+        # ----- Accessibility (SINGLE) -----
+        accessibility = None
+        try:
+            acc = compute_single_view_metrics(getattr(res_obj, 'clearances', []) or [],
+                                              min_clear_required_m=req.min_clear)
+            accessibility = {
+                "min_clear_required_m": acc.min_clear_required_m,
+                "global": acc.global_stats.__dict__,
+                "per_type": {k: v.__dict__ for k, v in acc.per_type.items()},
+            }
+        except Exception:
+            accessibility = None
 
     clearance_items = [
         ClearanceItem(
@@ -258,6 +302,7 @@ def analyse(req: AddressReq):
         multi_metadata  = multi_metadata,
         per_heading     = per_heading,
         obstacle_images = obstacle_images,
+        accessibility   = accessibility
     )
 
 

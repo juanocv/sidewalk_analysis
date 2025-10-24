@@ -79,9 +79,15 @@ def run_pipeline(pipe, cfg: RequestConfig):
     # Multi-view: prefer address or lat/lon; pipeline handles sampling
     if cfg.multi_view:
         if cfg.lat is not None and cfg.lon is not None:
-            out = pipe.analyse_coords(lat=cfg.lat, lon=cfg.lon, pitch=cfg.pitch, fov=cfg.fov)
+            # novo pipeline: use multi_view=True em analyse_coords
+            out = pipe.analyse_coords(
+                lat=cfg.lat, lon=cfg.lon,
+                pitch=cfg.pitch, fov=cfg.fov,
+                multi_view=True,
+            )
         elif cfg.address:
-            out = pipe.analyse_address(cfg.address)
+            # novo método específico de multi-view por endereço
+            out = pipe.analyse_address_multiview(cfg.address)
         else:
             raise ValueError("Either address or lat+lon required for multi-view")
 

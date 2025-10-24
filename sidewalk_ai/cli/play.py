@@ -13,6 +13,7 @@ Examples
                                     --label sidewalk,pavement,path
 """
 
+from flask import json
 import sidewalk_ai as sw
 from sidewalk_ai.cli._builder import build_segmenter
 from sidewalk_ai.cli._debug_viz import write_debug_sheet
@@ -22,6 +23,10 @@ from sidewalk_ai.models.factory import build_depth
 import numpy as np
 from pathlib import Path
 from sidewalk_ai.api.request import from_cli_args, run_pipeline
+from sidewalk_ai.processing.accessibility import (
+   compute_single_view_metrics,
+   compute_multiview_metrics,
+)
 import base64
 
 
@@ -95,6 +100,7 @@ if multi_view_meta is not None:
         else:
             print(f"  RIGHT no median (headings={counts.get('right',0)})")
 
+'''
     if args.debug:
         imgs = multi_view_meta.get('obstacle_images', []) or []
         perh = multi_view_meta.get('per_heading', []) or []
@@ -111,7 +117,7 @@ if multi_view_meta is not None:
                 print(f"WROTE DEBUG {fname}")
             except Exception as e:
                 print(f"Failed to write obstacle image #{i}: {e}")
-
+'''
 # ──────────────────────────── Print results ─────────────────────────
 # `analyse_coords` and `analyse_address` may return tuples of lists
 # (left_estimates, right_estimates). Normalize to a single printable
@@ -140,6 +146,31 @@ def _print_result(obj):
     print(f"WIDTH  {chosen.width.width_m:.2f} ± {chosen.width.margin_m:.2f} m")
     for c in chosen.clearances:
         print(f"CLEAR  {c.label:<8} {c.obs_width:.2f} m  L={c.L_m:.2f}  R={c.R_m:.2f}")
+
+    # ── Accessibility (single-view) ───────────────────────────────────
+    try:
+        thr = float(getattr(args, "min_clear", 1.20))
+        acc = compute_single_view_metrics(chosen.clearances, min_clear_required_m=thr)
+        g = acc.global_stats
+        print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
+        print(f"  Obstacles={g.total_obstacles} | "
+              f"Median (l/r corridors)={g.free_total_m.get('median', float('nan')):.2f} m | "
+              f"≥{thr:.2f}m={g.meets_120m_ratio:.0%} | Rating={g.rating}")
+        if acc.per_type:
+            print("  Per-type medians (m):")
+            for t, m in acc.per_type.items():
+                lm = m.free_left_m.get('median', float('nan'))
+                rm = m.free_right_m.get('median', float('nan'))
+                #tm = m.free_total_m.get('median', float('nan'))
+                print(f"    - {t}: left={lm:.2f}  right={rm:.2f}")
+        # optional JSON
+        if getattr(args, "metrics_json", None):
+            out = {"min_clear_required_m": acc.min_clear_required_m,
+                   "global": g.__dict__,
+                   "per_type": {k: v.__dict__ for k, v in acc.per_type.items()}}
+            Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[WARN] failed to compute accessibility metrics for single-view: {e}")
 
 
 def _median_of_estimates(estimates):
@@ -224,6 +255,33 @@ def _print_tuple_results(obj):
     _print_and_debug_list(right, "RIGHT")
 
 
+   # ── Accessibility (multi-view) ────────────────────────────────────
+    try:
+       thr = float(getattr(args, "min_clear", 1.20))
+       acc = compute_multiview_metrics(left, right, min_clear_required_m=thr)
+       print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
+       for side in ("LEFT", "RIGHT", "ALL"):
+           g = acc[side].global_stats
+           avg = g.avg_obstacles_per_view_rounded or g.avg_obstacles_per_view or g.total_obstacles
+           med = g.free_total_m.get('median', float('nan'))
+           print(f"  {side:<5} → Obstacles≈{avg} (avg/view) | "
+                 f"Median (corridors)={med:.2f} m | "
+                 f"Corridors ≥{thr:.2f}m={g.meets_120m_ratio:.0%} | Rating={g.rating}")
+       # optional JSON
+       if getattr(args, "metrics_json", None):
+           def _acc_to_dict(a):
+               return {"min_clear_required_m": a.min_clear_required_m,
+                       "global": a.global_stats.__dict__,
+                       "per_type": {k: v.__dict__ for k, v in a.per_type.items()}}
+           out = {"LEFT":  _acc_to_dict(acc["LEFT"]),
+                   "RIGHT": _acc_to_dict(acc["RIGHT"]),
+                   "ALL":   _acc_to_dict(acc["ALL"])}
+           Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    except Exception as e:
+       print(f"[WARN] failed to compute accessibility metrics for multi-view: {e}")
+
+
+# Choose printing method based on result type
 if isinstance(res, tuple) and len(res) == 2:
     _print_tuple_results(res)
 else:
