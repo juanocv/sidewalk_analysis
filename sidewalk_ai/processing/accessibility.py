@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Iterable
 import numpy as np
 import re
+import os
 
 # ------------------------- helpers -------------------------
 
@@ -71,25 +72,21 @@ class AccessibilityMetrics:
 
 # ------------------------- core -------------------------
 
-def _rating_from_corridors(
-    median_corridor_m: float,
-    p10_corridor_m: float,
-    meet_ratio: float,
-    threshold_m: float = 1.20,
-) -> str:
+# fator do limiar intermediário (padrão 75% do threshold); pode ser ajustado por ENV
+_MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+
+def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.20) -> str:
     """
-    Ranking baseado no *corredor* (pool L∪R), robusto a assimetrias:
-    - III (boa): mediana ≥ threshold E (p10 ≥ 0.9·threshold OU meet_ratio ≥ 0.75)
-    - II (média): mediana ≥ threshold−0.20 OU 0.40 ≤ meet_ratio < 0.75
-    - I (ruim): demais casos
+    Ranking simples baseado na mediana do corredor (pool L∪R):
+      - III (Ideal):      mediana ≥ threshold
+      - II (Razoável):    mediana ≥ _MID_RATIO * threshold  (padrão: 0.75 * threshold)
+      - I  (Ruim):        caso contrário
     """
     if np.isnan(median_corridor_m):
         return "I"
-    if (median_corridor_m >= threshold_m) and (
-        (not np.isnan(p10_corridor_m) and p10_corridor_m >= 0.9 * threshold_m) or (meet_ratio >= 0.75)
-    ):
+    if median_corridor_m >= threshold_m:
         return "III"
-    if (median_corridor_m >= threshold_m - 0.20) or (0.40 <= meet_ratio < 0.75):
+    if median_corridor_m >= _MID_RATIO * threshold_m:
         return "II"
     return "I"
 
@@ -143,10 +140,8 @@ def compute_single_view_metrics(
             free_right_m=_robust_stats([r[1] for rows in by_type.values() for r in rows]),
             free_total_m=ft_stats,  # já contém median/p10/p90 do corredor (pool)
             meets_120m_ratio=meet_ratio,
-            rating=_rating_from_corridors(
+            rating=_rating_rank_by_threshold(
                 ft_stats.get("median", float("nan")),
-                ft_stats.get("p10", float("nan")),
-                meet_ratio,
                 min_clear_required_m,
             ),
         )
@@ -168,7 +163,7 @@ def compute_single_view_metrics(
             # keep same shape as the non-empty case: a dict with stats keys
             free_total_m=nan_stats,
             meets_120m_ratio=1.0,   # 100% atendem (não há bloqueio)
-            rating="III",
+            rating="III", # regra simplificada: sem obstáculos = ideal
         )
 
     return AccessibilityMetrics(
