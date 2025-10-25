@@ -392,7 +392,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- FOOTER ------------------------------------------------
     ftr_h = 30
     footer = np.full((ftr_h, grid.shape[1], 3), 30, np.uint8)
-    clear  = ", ".join(f"{c.label}:{c.total_m:.2f}m" for c in res.clearances) \
+    clear  = ", ".join(f"{c.label}:{c.obs_width:.2f}m" for c in res.clearances) \
              if res.clearances else "no obstacles"
     txt2 = f"width = {res.width.width_m:.2f} +/- {res.width.margin_m:.2f} m   " \
            f"|   clearance: {clear}"
