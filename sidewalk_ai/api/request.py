@@ -116,10 +116,6 @@ def run_pipeline(pipe, cfg: RequestConfig):
         per_heading = []
         obstacle_images = []
 
-        def _png_b64_from_rgb(rgb_arr: np.ndarray) -> str:
-            bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
-            return base64.b64encode(cv2.imencode('.png', bgr)[1]).decode()
-
         for side_name, lst in (('left', left), ('right', right)):
             for i, est in enumerate(lst):
                 ch = {

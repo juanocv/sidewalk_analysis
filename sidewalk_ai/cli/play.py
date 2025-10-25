@@ -159,7 +159,7 @@ def _print_result(obj):
         # opcional: ainda pode mostrar a fração ≥ threshold, mas sem sugerir que afeta o ranking
         # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_120m_ratio:.0%}")
         if acc.per_type:
-            print("  Per-type medians (m):")
+            print("  Per-type corridor medians (m):")
             for t, m in acc.per_type.items():
                 lm = m.free_left_m.get('median', float('nan'))
                 rm = m.free_right_m.get('median', float('nan'))

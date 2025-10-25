@@ -4,7 +4,6 @@ import base64
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from fastapi import FastAPI, HTTPException
 from sidewalk_ai.processing.accessibility import (
     compute_single_view_metrics, compute_multiview_metrics
 )
@@ -250,12 +249,12 @@ def analyse(req: AddressReq):
             accessibility = {
                 "LEFT": {
                     "min_clear_required_m": acc["LEFT"].min_clear_required_m,
-                    "global": acc["LEFT"].global_stats.__dict__,
+                    "global_stats": acc["LEFT"].global_stats.__dict__,
                     "per_type": {k: v.__dict__ for k, v in acc["LEFT"].per_type.items()},
                 },
                 "RIGHT": {
                     "min_clear_required_m": acc["RIGHT"].min_clear_required_m,
-                    "global": acc["RIGHT"].global_stats.__dict__,
+                    "global_stats": acc["RIGHT"].global_stats.__dict__,
                     "per_type": {k: v.__dict__ for k, v in acc["RIGHT"].per_type.items()},
                 },
                 "ALL": {
@@ -275,7 +274,7 @@ def analyse(req: AddressReq):
                                               min_clear_required_m=req.min_clear)
             accessibility = {
                 "min_clear_required_m": acc.min_clear_required_m,
-                "global": acc.global_stats.__dict__,
+                "global_stats": acc.global_stats.__dict__,
                 "per_type": {k: v.__dict__ for k, v in acc.per_type.items()},
             }
         except Exception:
