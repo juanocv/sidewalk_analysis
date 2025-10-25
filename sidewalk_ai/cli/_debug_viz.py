@@ -11,6 +11,70 @@ def make_palette():
     rng = np.random.default_rng(0)
     lut = rng.integers(0,255,(256,3),np.uint8); lut[0]=(0,0,255); return lut
 
+def _pad_or_crop_height(img: np.ndarray, target_h: int, pad_color: int | tuple = 255) -> np.ndarray:
+    """
+    Casa a ALTURA sem redimensionar (sem interpolação):
+      - se img é mais baixa: preenche embaixo com branco (ou pad_color)
+      - se img é mais alta: corta o excedente embaixo
+    """
+    h, w = img.shape[:2]
+    if h == target_h:
+        return img
+    if h < target_h:
+        if isinstance(pad_color, int):
+            pad = np.full((target_h - h, w, 3), pad_color, np.uint8)
+        else:
+            # pad_color é (B,G,R)
+            pad = np.tile(np.array(pad_color, np.uint8).reshape(1,1,3), (target_h - h, w, 1))
+        return np.vstack([img, pad])
+    # h > target_h
+    return img[:target_h, :, :]
+
+def _match_height(img: np.ndarray, target_h: int) -> np.ndarray:
+    """Resize preserving width to match target height for safe hstack."""
+    h, w = img.shape[:2]
+    if h == target_h:
+        return img
+    interp = cv2.INTER_AREA if h > target_h else cv2.INTER_LINEAR
+    return cv2.resize(img, (w, target_h), interpolation=interp)
+
+def _make_depth_legend(vmin: float, vmax: float, height: int, *, label: str,
+                       bar_w: int = 20, right_pad: int = 6) -> np.ndarray:
+    """
+    Barra vertical (INFERNO) + coluna de texto, compacta:
+      - barra mais fina (bar_w)
+      - largura de texto calculada exatamente pelo tamanho dos rótulos
+      - sem largura mínima (acaba o espaço em branco)
+    """
+    # gradiente (topo = valores maiores)
+    bar = np.linspace(255, 0, height, dtype=np.uint8).reshape(height, 1)
+    bar = np.repeat(bar, max(12, bar_w), axis=1)  # nunca menos que 12px p/ legibilidade
+    bar_color = cv2.applyColorMap(bar, cv2.COLORMAP_INFERNO)
+
+    # textos e medidas
+    vmax_txt = f"{vmax:.2f} {label}"
+    vmin_txt = f"{vmin:.2f} {label}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fs, th = 0.5, 1
+    (w1, _), _ = cv2.getTextSize(vmax_txt, font, fs, th)
+    (w2, _), _ = cv2.getTextSize(vmin_txt, font, fs, th)
+    text_w = max(w1, w2) + right_pad  # largura exata + folga curta
+
+    # coluna de texto compacta
+    text_col = np.full((height, text_w, 3), 255, np.uint8)
+
+    legend = np.hstack([bar_color, text_col])
+
+    # posições (com folga pequena à esquerda do texto)
+    x_text = bar_color.shape[1] + 4
+    top_y  = 14
+    bot_y  = max(16, height - 8)  # garante que o texto inferior não saia da imagem
+
+    cv2.putText(legend, vmax_txt, (x_text, top_y), font, fs, (0,0,0), th, cv2.LINE_AA)
+    cv2.putText(legend, vmin_txt, (x_text, bot_y), font, fs, (0,0,0), th, cv2.LINE_AA)
+
+    return legend
+
 def add_title(img, text):
     canvas = img.copy()
     cv2.putText(canvas, text, (10, 25),
@@ -311,9 +375,9 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                 cv2.putText(overlay, olabel, (cx, cy),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
 
-        if legend.shape[0]<h:
-            legend=np.vstack([legend,np.full((h-legend.shape[0],legend.shape[1],3),255,np.uint8)])
-        tiles.append(add_title(np.hstack([overlay,legend]),"Panoptic overlay"))
+        # normaliza a altura da legenda para combinar com a imagem SEM redimensionar (sem compressão)
+        legend = _pad_or_crop_height(legend, h)  # onde h é a altura do overlay/img_bgr
+        tiles.append(add_title(np.hstack([overlay, legend]), "Panoptic overlay"))
 
     # 2 refined overlay
     # tiles.append(add_title(overlay_mask(img_bgr,res.refined_mask.astype(bool)),"Sidewalk (refined mask)"))
@@ -359,12 +423,22 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                                             cv2.COLOR_GRAY2BGR),
                             "Sidewalk (refined mask only)"))
 
-    # 3 depth - FIX: Use correct depth model name
+    # 3 depth - com legenda de escala (sem cabeçalho interno na legenda)
     depth = pipeline.depth_est.predict(img_rgb)
-    vis=((depth-depth.min())/(depth.ptp()+1e-6)*255).astype(np.uint8)
+    dmin, dmax = float(depth.min()), float(depth.max())
+    vis = ((depth - dmin) / (max(dmax - dmin, 1e-6)) * 255).astype(np.uint8)
+    depth_color = cv2.applyColorMap(vis, cv2.COLORMAP_INFERNO)
+
     depth_model_name = get_depth_model_name(pipeline.depth_est)
-    tiles.append(add_title(cv2.applyColorMap(vis,cv2.COLORMAP_INFERNO),f"Depth ({depth_model_name})"))
-    
+    unit_label = "m" if getattr(pipeline.depth_est, "is_metric", False) else "rel."
+
+    legend_depth = _make_depth_legend(dmin, dmax, height=depth_color.shape[0], label=unit_label)
+    # garante mesma altura sem escalonar (aqui deve bater, mas deixo defensivo):
+    legend_depth = _pad_or_crop_height(legend_depth, depth_color.shape[0])
+
+    depth_tile = np.hstack([depth_color, legend_depth])
+    tiles.append(add_title(depth_tile, f"Depth ({depth_model_name})"))
+
     # grid + header/footer
     tile_h, tile_w = tiles[0].shape[:2]
     cols = 3
