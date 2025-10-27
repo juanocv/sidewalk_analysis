@@ -17,7 +17,6 @@ from flask import json
 import sidewalk_ai as sw
 from sidewalk_ai.cli._builder import build_segmenter
 from sidewalk_ai.cli._debug_viz import write_debug_sheet
-from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.cli._argparse import build_parser
 from sidewalk_ai.models.factory import build_depth 
 import numpy as np
@@ -27,8 +26,6 @@ from sidewalk_ai.processing.accessibility import (
    compute_single_view_metrics,
    compute_multiview_metrics,
 )
-import base64
-
 
 # ───────────────────────── CLI args ────────────────────────────────
 args = build_parser().parse_args()
@@ -150,14 +147,19 @@ def _print_result(obj):
     # ── Accessibility (single-view) ───────────────────────────────────
     try:
         thr = float(getattr(args, "min_clear", 1.20))
+        # o mesmo fator usado no accessibility.py (padrão 0.75)
+        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+        mid_thr = mid_ratio * thr
         acc = compute_single_view_metrics(chosen.clearances, min_clear_required_m=thr)
         g = acc.global_stats
-        print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
+        med = g.free_total_m.get('median', float('nan'))
         print(f"  Obstacles={g.total_obstacles} | "
-              f"Median (l/r corridors)={g.free_total_m.get('median', float('nan')):.2f} m | "
-              f"≥{thr:.2f}m={g.meets_120m_ratio:.0%} | Rating={g.rating}")
+              f"Median corridor={med:.2f} m | "
+              f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
+        # opcional: ainda pode mostrar a fração ≥ threshold, mas sem sugerir que afeta o ranking
+        # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
         if acc.per_type:
-            print("  Per-type medians (m):")
+            print("  Per-type corridor medians (m):")
             for t, m in acc.per_type.items():
                 lm = m.free_left_m.get('median', float('nan'))
                 rm = m.free_right_m.get('median', float('nan'))
@@ -258,6 +260,10 @@ def _print_tuple_results(obj):
    # ── Accessibility (multi-view) ────────────────────────────────────
     try:
        thr = float(getattr(args, "min_clear", 1.20))
+       import os
+       mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+       mid_thr = mid_ratio * thr
+
        acc = compute_multiview_metrics(left, right, min_clear_required_m=thr)
        print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
        for side in ("LEFT", "RIGHT", "ALL"):
@@ -265,8 +271,10 @@ def _print_tuple_results(obj):
            avg = g.avg_obstacles_per_view_rounded or g.avg_obstacles_per_view or g.total_obstacles
            med = g.free_total_m.get('median', float('nan'))
            print(f"  {side:<5} → Obstacles≈{avg} (avg/view) | "
-                 f"Median (corridors)={med:.2f} m | "
-                 f"Corridors ≥{thr:.2f}m={g.meets_120m_ratio:.0%} | Rating={g.rating}")
+                 f"Median corridor={med:.2f} m | "
+                 f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
+           # opcional:
+           # print(f"           Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
        # optional JSON
        if getattr(args, "metrics_json", None):
            def _acc_to_dict(a):

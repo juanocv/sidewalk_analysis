@@ -55,17 +55,3 @@ def build_segmenter(seg_flag: str, *, ckpt: str|None,
         base=base_seg,
         synonyms=synonyms
     )   
-
-
-    def get_class_labels(self):
-        """Get class labels mapping for the current backend"""
-        if hasattr(self.base, 'get_class_labels'):
-            return self.base.get_class_labels()
-        
-        # Fallback: try to get from common attributes
-        if hasattr(self.base, 'id2label'):
-            return self.base.id2label
-        elif hasattr(self.base, 'config') and hasattr(self.base.config, 'id2label'):
-            return self.base.config.id2label
-        
-        return None

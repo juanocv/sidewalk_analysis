@@ -4,9 +4,68 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Iterable
 import numpy as np
 import re
+import os
 
-# ------------------------- helpers -------------------------
+# ------------------------- helpers públicos -------------------------
+def round_half_up(x: float) -> int:
+    return int(np.floor(x + 0.5))
 
+def types_summary(res_list):
+    """
+    res_list: lista de Results de um lado (LEFT/RIGHT).
+    Retorna {tipo: {"prevalence": float 0..1, "typical_count_when_present": int}}
+    - só inclui tipos que aparecem em pelo menos 1 vista (evita zeros “ruins”).
+    """
+    n = len(res_list) or 0
+    if n == 0:
+        return {}
+
+    by_type_counts: dict[str, list[int]] = {}  # {tipo: [c0, c1, ... c{n-1}]}
+
+    for i, r in enumerate(res_list):
+        # 1) começa assumindo 0 para todos os tipos já vistos
+        for t in by_type_counts.keys():
+            by_type_counts[t].append(0)
+
+        # 2) conta tipos desta vista
+        counts: dict[str, int] = {}
+        for c in getattr(r, "clearances", []) or []:
+            t = _label_to_type(c.label)
+            counts[t] = counts.get(t, 0) + 1
+
+        # 3) para tipos novos, crie histórico de zeros das vistas passadas e
+        #    acrescente o valor corrente; para tipos já conhecidos, sobrescreva o 0 recém-apensado
+        for t, cnt in counts.items():
+            if t not in by_type_counts:
+                by_type_counts[t] = [0] * i  # zeros para as i vistas anteriores
+                by_type_counts[t].append(cnt)
+            else:
+                by_type_counts[t][-1] = cnt  # substitui o 0 desta vista pelo cnt
+
+    out = {}
+    for t, seq in by_type_counts.items():
+        # seq tem tamanho n (uma contagem por vista)
+        if max(seq) == 0:
+            continue  # não reporta tipos que nunca aparecem (segurança extra)
+        prevalence = float(np.mean([1 if v > 0 else 0 for v in seq]))
+        cond = [v for v in seq if v > 0]
+        p50 = float(np.median(cond))
+        out[t] = {
+            "prevalence": prevalence,
+            "typical_count_when_present": round_half_up(p50),
+        }
+    return out
+
+def corridor_block(acc_side):
+    g = acc_side.global_stats
+    # g.free_total_m tem as estatísticas do corredor (pool L∪R)
+    return {
+        "median_m": g.free_total_m.get("median", float("nan")),
+        "meets_ratio": g.meets_ratio,
+        "rating": g.rating,
+    }
+
+# ------------------------- helpers privados -------------------------
 def _safe_array(vals: Iterable[float]) -> np.ndarray:
     arr = np.array([v for v in vals if v is not None and np.isfinite(v)], dtype=float)
     return arr if arr.size else np.array([], dtype=float)
@@ -32,7 +91,7 @@ def _robust_stats(vals: Iterable[float]) -> Dict[str, float]:
         p10=float(np.percentile(xr, 10)),
         p90=float(np.percentile(xr, 90)),
     )
-
+    
 _LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
 
 def _label_to_type(label: str) -> str:
@@ -48,48 +107,85 @@ class PerTypeMetrics:
     free_left_m: Dict[str, float]
     free_right_m: Dict[str, float]
     free_total_m: Dict[str, float]
-    # largura média "ocupada" pelo obstáculo, se você quiser reportar também:
-    obstacle_width_m: Dict[str, float] | None = None
+    obs_width_m: Dict[str, float] | None = None
 
+    def to_dict(self, drop_none: bool = True) -> Dict:
+        d = {
+            "count": self.count,
+            "free_left_m": self.free_left_m,
+            "free_right_m": self.free_right_m,
+            "free_total_m": self.free_total_m,
+            "obs_width_m": self.obs_width_m,
+        }
+        if drop_none:
+            d = {k: v for k, v in d.items() if v is not None}
+        return d
+    
 @dataclass(frozen=True)
 class GlobalMetrics:
     total_obstacles: int
     free_left_m: Dict[str, float]       # stats globais
     free_right_m: Dict[str, float]
     free_total_m: Dict[str, float]
-    meets_120m_ratio: float             # fração de instâncias com total_m >= 1.20
+    meets_ratio: float             # fração de instâncias com total_m >= 1.20
     rating: str                         # "I"/"II"/"III"
+    # novo: estatísticas globais de largura dos obstáculos
+    obs_width_m: Dict[str, float] | None = None
     # Multi-view only (None em single-view):
     avg_obstacles_per_view: float | None = None
     avg_obstacles_per_view_rounded: int | None = None
 
+    def to_dict(self, *, drop_none: bool = True, drop_avgs_if_none: bool = True) -> Dict:
+        d = {
+            "total_obstacles": self.total_obstacles,
+            "free_left_m": self.free_left_m,
+            "free_right_m": self.free_right_m,
+            "free_total_m": self.free_total_m,
+            "meets_ratio": self.meets_ratio,
+            "rating": self.rating,
+            "obs_width_m": self.obs_width_m,
+            "avg_obstacles_per_view": self.avg_obstacles_per_view,
+            "avg_obstacles_per_view_rounded": self.avg_obstacles_per_view_rounded,
+        }
+        if drop_avgs_if_none:
+            # esconde automaticamente no single-view
+            if d["avg_obstacles_per_view"] is None:
+                d.pop("avg_obstacles_per_view")
+            if d["avg_obstacles_per_view_rounded"] is None:
+                d.pop("avg_obstacles_per_view_rounded")
+        if drop_none:
+            d = {k: v for k, v in d.items() if v is not None}
+        return d
+    
 @dataclass(frozen=True)
 class AccessibilityMetrics:
     min_clear_required_m: float
     per_type: Dict[str, PerTypeMetrics]
     global_stats: GlobalMetrics
 
+    def to_dict(self, drop_none: bool = True) -> Dict:
+        return {
+            "min_clear_required_m": self.min_clear_required_m,
+            "global_stats": self.global_stats.to_dict(drop_none=drop_none, drop_avgs_if_none=True),
+            "per_type": {k: v.to_dict(drop_none=drop_none) for k, v in self.per_type.items()},
+        }
 # ------------------------- core -------------------------
 
-def _rating_from_corridors(
-    median_corridor_m: float,
-    p10_corridor_m: float,
-    meet_ratio: float,
-    threshold_m: float = 1.20,
-) -> str:
+# fator do limiar intermediário (padrão 75% do threshold); pode ser ajustado por ENV
+_MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+
+def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.20) -> str:
     """
-    Ranking baseado no *corredor* (pool L∪R), robusto a assimetrias:
-    - III (boa): mediana ≥ threshold E (p10 ≥ 0.9·threshold OU meet_ratio ≥ 0.75)
-    - II (média): mediana ≥ threshold−0.20 OU 0.40 ≤ meet_ratio < 0.75
-    - I (ruim): demais casos
+    Ranking simples baseado na mediana do corredor (pool L∪R):
+      - III (Ideal):      mediana ≥ threshold
+      - II (Razoável):    mediana ≥ _MID_RATIO * threshold  (padrão: 0.75 * threshold)
+      - I  (Ruim):        caso contrário
     """
     if np.isnan(median_corridor_m):
         return "I"
-    if (median_corridor_m >= threshold_m) and (
-        (not np.isnan(p10_corridor_m) and p10_corridor_m >= 0.9 * threshold_m) or (meet_ratio >= 0.75)
-    ):
+    if median_corridor_m >= threshold_m:
         return "III"
-    if (median_corridor_m >= threshold_m - 0.20) or (0.40 <= meet_ratio < 0.75):
+    if median_corridor_m >= _MID_RATIO * threshold_m:
         return "II"
     return "I"
 
@@ -97,78 +193,67 @@ def compute_single_view_metrics(
     clearances: Iterable,      # Sequence[ClearanceResult]
     *,
     min_clear_required_m: float = 1.20,
-    include_obstacle_width: bool = False,
+    include_obstacle_width: bool = True,  # mantido p/ compat., mas agora sempre consideramos
 ) -> AccessibilityMetrics:
-    """
-    Gera métricas robustas para UMA imagem (single-view).
-    """
-    # Materializa listas
     items = list(clearances)
 
-    # Por tipo
-    # guardamos tuplas (L, R, total_m_original, obs_width) mas
-    # "total" nas métricas passará a significar *corredor (pool L∪R)*
     by_type: Dict[str, List[Tuple[float,float,float,float]]] = {}
     for c in items:
         t = _label_to_type(c.label)
-        by_type.setdefault(t, []).append( (c.L_m or 0.0, c.R_m or 0.0, c.total_m or 0.0, c.obs_width or 0.0) )
+        by_type.setdefault(t, []).append((
+            c.L_m or 0.0,
+            c.R_m or 0.0,
+            c.total_m or 0.0,
+            (c.obs_width if c.obs_width is not None else np.nan)
+        ))
 
     per_type: Dict[str, PerTypeMetrics] = {}
     all_total = []
+    all_obsw  = []
+
     for t, rows in by_type.items():
         Ls = [r[0] for r in rows]
         Rs = [r[1] for r in rows]
-        # “total” nas métricas = CORREDOR (pool L∪R)
         corridors = [v for v in [*Ls, *Rs] if v is not None]
-        Ws = [r[3] for r in rows]
+        Ws = [float(w) for (_,_,_,w) in rows if w is not None and np.isfinite(w)]
+
         per_type[t] = PerTypeMetrics(
             count=len(rows),
             free_left_m=_robust_stats(Ls),
             free_right_m=_robust_stats(Rs),
-            free_total_m=_robust_stats(corridors),  # agora: pool L∪R
-            obstacle_width_m=_robust_stats(Ws) if include_obstacle_width else None,
+            free_total_m=_robust_stats(corridors),   # pool L∪R
+            obs_width_m=_robust_stats(Ws) if Ws else None,
         )
-        all_total.extend(corridors)
 
-    # “global total” = CORREDOR (pool L∪R) para todos os tipos
+        all_total.extend(corridors)
+        all_obsw.extend(Ws)
+
     all_corridors = _safe_array(all_total)
     if all_corridors.size:
         msk = _iqr_mask(all_corridors)
         all_corridors = all_corridors[msk] if msk.sum() >= 2 else all_corridors
         meet_ratio = float(np.mean(all_corridors >= min_clear_required_m))
-        ft_stats = _robust_stats(all_corridors)  # stats do corredor global
+        ft_stats = _robust_stats(all_corridors)
         glob = GlobalMetrics(
             total_obstacles=int(sum(len(rows) for rows in by_type.values())),
             free_left_m=_robust_stats([r[0] for rows in by_type.values() for r in rows]),
             free_right_m=_robust_stats([r[1] for rows in by_type.values() for r in rows]),
-            free_total_m=ft_stats,  # já contém median/p10/p90 do corredor (pool)
-            meets_120m_ratio=meet_ratio,
-            rating=_rating_from_corridors(
-                ft_stats.get("median", float("nan")),
-                ft_stats.get("p10", float("nan")),
-                meet_ratio,
-                min_clear_required_m,
-            ),
+            free_total_m=ft_stats,
+            meets_ratio=meet_ratio,
+            rating=_rating_rank_by_threshold(ft_stats.get("median", float("nan")), min_clear_required_m),
+            obs_width_m=_robust_stats(all_obsw) if all_obsw else None,
         )
     else:
-        # Sem obstáculos → acessibilidade plena.
-        # Para evitar NaN no output, fixamos as estatísticas do "corredor"
-        # no próprio limiar (ou poderia ser qualquer valor ≥ limiar).
+        # sem obstáculos → corredor "cheio" e obs_width_m inexistente
         nan_stats = {"median": float("nan"), "p10": float("nan"), "p90": float("nan"), "mean": float("nan")}
-        ft_stats = {
-            "median": float(min_clear_required_m),
-            "p10":    float(min_clear_required_m),
-            "p90":    float(min_clear_required_m),
-            "mean":   float(min_clear_required_m),
-        }
         glob = GlobalMetrics(
             total_obstacles=0,
             free_left_m=_robust_stats([]),
             free_right_m=_robust_stats([]),
-            # keep same shape as the non-empty case: a dict with stats keys
             free_total_m=nan_stats,
-            meets_120m_ratio=1.0,   # 100% atendem (não há bloqueio)
+            meets_ratio=1.0,
             rating="III",
+            obs_width_m=None,
         )
 
     return AccessibilityMetrics(
@@ -177,6 +262,9 @@ def compute_single_view_metrics(
         global_stats=glob,
     )
 
+def _counts(res_list):
+    return [len(getattr(r, "clearances", []) or []) for r in res_list]
+    
 def compute_multiview_metrics(
     results_left: Iterable,   # Iterable[Result]
     results_right: Iterable,  # Iterable[Result]
@@ -204,13 +292,6 @@ def compute_multiview_metrics(
         "ALL":   compute_single_view_metrics(all_cl,   min_clear_required_m=min_clear_required_m),
     }
 
-    # helper p/ arredondar 2.5 -> 3 (half-up)
-    def _round_half_up(x: float) -> int:
-        return int(np.floor(x + 0.5))
-
-    def _counts(res_list):
-        return [len(getattr(r, "clearances", []) or []) for r in res_list]
-
     # LEFT / RIGHT: média por vista daquele lado
     for side, res_list in (("LEFT", results_left), ("RIGHT", results_right)):
         counts = _counts(res_list)
@@ -220,18 +301,19 @@ def compute_multiview_metrics(
             min_clear_required_m=out[side].min_clear_required_m,
             per_type=out[side].per_type,
             global_stats=GlobalMetrics(
-                total_obstacles=gm.total_obstacles,                 # soma (mantido para auditoria)
+                total_obstacles=gm.total_obstacles,
                 free_left_m=gm.free_left_m,
                 free_right_m=gm.free_right_m,
                 free_total_m=gm.free_total_m,
-                meets_120m_ratio=gm.meets_120m_ratio,
+                meets_ratio=gm.meets_ratio,
                 rating=gm.rating,
+                obs_width_m=gm.obs_width_m,  # <<-- preserva
                 avg_obstacles_per_view=avg,
-                avg_obstacles_per_view_rounded=_round_half_up(avg),
+                avg_obstacles_per_view_rounded=round_half_up(avg),
             ),
         )
 
-    # ALL: usar todas as vistas de ambos os lados
+    # ALL
     counts_all = _counts(results_left) + _counts(results_right)
     avg_all = float(np.mean(counts_all)) if counts_all else 0.0
     gm = out["ALL"].global_stats
@@ -243,10 +325,11 @@ def compute_multiview_metrics(
             free_left_m=gm.free_left_m,
             free_right_m=gm.free_right_m,
             free_total_m=gm.free_total_m,
-            meets_120m_ratio=gm.meets_120m_ratio,
+            meets_ratio=gm.meets_ratio,
             rating=gm.rating,
+            obs_width_m=gm.obs_width_m,  # <<--
             avg_obstacles_per_view=avg_all,
-            avg_obstacles_per_view_rounded=_round_half_up(avg_all),
+            avg_obstacles_per_view_rounded=round_half_up(avg_all),
         ),
     )
     return out

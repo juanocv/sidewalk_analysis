@@ -3,10 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import time
-from typing import Iterable, Sequence, Literal
+from typing import Iterable, Sequence
 
-from matplotlib import pyplot as plt
 import numpy as np
 
 from sidewalk_ai.processing.refinement import refine_sidewalk_mask
@@ -101,45 +99,67 @@ class SidewalkPipeline:
     # ------------------------------------------------------------------ #
     # Convenience overloads                                              #
     # ------------------------------------------------------------------ #
-    def analyse_address(self, address: str, *, heading: int | None = None) -> Result:
+    def analyse_address(
+        self,
+        address: str,
+        *,
+        heading: int | None = None,
+        pitch: int = 0,
+        fov: int = 90,
+    ) -> Result:
         """
-        **Single-view**: resolve (lat,lon) a partir do endereço, escolhe um heading
-        (o fornecido; caso contrário, o 'center' se disponível; senão 0°) e retorna 1 Result.
+        Single-view por endereço. Se heading não for dado, tenta achar o centro
+        (usando pitch/fov) e usa 0° como fallback.
         """
         lat, lon = self.sv.geocode(address)
-        use_heading = heading
-        if use_heading is None:
-            center = self._find_street_center(lat=lat, lon=lon)
-            use_heading = center if center is not None else 0
-        req = ImageRequest(lat, lon, heading=int(use_heading))
+        if heading is None:
+            center = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+            heading = center if center is not None else 0
+
+        req = ImageRequest(lat, lon, heading=int(heading), pitch=pitch, fov=fov)
         img_path = self.sv.fetch(req)
         return self._analyse_path(img_path)
 
-    def analyse_address_multiview(self, address: str) -> tuple[list["Result"], list["Result"]]:
+    def analyse_address_multiview(
+        self,
+        address: str,
+        *,
+        pitch: int = 0,
+        fov: int = 90,
+        max_per_side: int = 4,   # limite prático p/ tempo de execução
+    ) -> tuple[list["Result"], list["Result"]]:
         """
-        **Multi-view**: amostra ângulos à esquerda e à direita do heading central
-        e retorna (left_results, right_results).
+        Multi-view por endereço: amostra ângulos à esquerda/direita do centro.
+        Usa 0° como fallback se o centro não for encontrado.
         """
         lat, lon = self.sv.geocode(address)
-        center_heading = self._find_street_center(lat=lat, lon=lon)
+        center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+        if center_heading is None:
+            center_heading = 0  # fallback robusto
+
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
+        if max_per_side is not None and max_per_side > 0:
+            left_headings  = left_headings[:max_per_side]
+            right_headings = right_headings[:max_per_side]
 
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
         for h in left_headings:
-            req = ImageRequest(lat, lon, heading=h)
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
                 left_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
+
         for h in right_headings:
-            req = ImageRequest(lat, lon, heading=h)
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
                 right_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
+
         return left_estimates, right_estimates
 
     def analyse_coords(
@@ -150,11 +170,8 @@ class SidewalkPipeline:
         fov:     int = 90,
         *,
         multi_view: bool = False,
+        max_per_side: int = 4,  # novo knob
     ) -> Result | tuple[list["Result"], list["Result"]]:
-        """
-        Se multi_view=False → single-view usando heading fornecido (ou center/0).
-        Se multi_view=True  → multi-view (listas por lado).
-        """
         if not multi_view:
             use_heading = heading
             if use_heading is None:
@@ -165,7 +182,13 @@ class SidewalkPipeline:
             return self._analyse_path(img_path)
 
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+        if center_heading is None:
+            center_heading = heading if heading is not None else 0  # fallback
+
         left_headings, right_headings = self._generate_heading_ranges(center_heading)
+        if max_per_side is not None and max_per_side > 0:
+            left_headings  = left_headings[:max_per_side]
+            right_headings = right_headings[:max_per_side]
 
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
@@ -176,6 +199,7 @@ class SidewalkPipeline:
                 left_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
+
         for h in right_headings:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
@@ -183,94 +207,68 @@ class SidewalkPipeline:
                 right_estimates.append(self._analyse_path(img_path))
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
+
         return left_estimates, right_estimates
+    
     # ------------------------------------------------------------------ #
     # Core implementation (private)                                      #
     def _find_street_center(
         self,
-        lat: float | None = None,
-        lon: float | None = None,
-        address: str | None = None,
+        lat: float,
+        lon: float,
+        *,
         pitch: int = 0,
         fov: int = 90,
         test_angles: list[int] | None = None,
     ) -> int | None:
         """
-        Find the heading that shows the street center (two sidewalks visible).
-        
-        Parameters
-        ----------
-        lat, lon : float
-            Location coordinates
-        pitch, fov : int
-            Camera parameters
-        test_angles : list[int], optional
-            Headings to test. Defaults to [0, 90, 180, 270]
-        
-        Returns
-        -------
-        int or None
-            Best heading showing street center, or None if not found
+        Busca um heading que mostre o centro da rua (duas guias visíveis).
+        Retorna None se não achar em `test_angles`.
         """
         if test_angles is None:
             test_angles = [0, 90, 180, 270]
-        
+
         print(f"Testing {len(test_angles)} angles to find street center")
-        
+
         best_heading = None
-        best_score = -1
-        
+        best_score = -1.0
+
         for heading in test_angles:
             try:
-                # Fetch image for this heading
-                if address is None:
-                    req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
-                    img_path = self.sv.fetch(req)
-                    img_rgb = read_rgb(img_path)
-                elif lat is None or lon is None:
-                    img_path = self.sv.fetch(address)
-                    img_rgb = read_rgb(img_path)
+                req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+                img_path = self.sv.fetch(req)
+                img_rgb = read_rgb(img_path)
 
-                # Quick segmentation (just need the mask)
                 out = self.segmenter.segment(img_rgb)
                 sidewalk_mask = out[0]
-                
-                # Handle ensemble outputs
                 if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
                     sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
-                
-                # Check if we have two curbs (street center indicator)
+
                 has_two = _has_two_curbs(sidewalk_mask, min_gap_px=50)
-                
-                # Score this heading
                 if has_two:
-                    # Additional scoring: prefer more balanced sidewalk coverage
                     cols = np.where(sidewalk_mask)[1]
                     if cols.size > 0:
-                        left_coverage = np.sum(cols < sidewalk_mask.shape[1] // 2)
-                        right_coverage = np.sum(cols >= sidewalk_mask.shape[1] // 2)
-                        balance = min(left_coverage, right_coverage) / max(left_coverage, right_coverage, 1)
+                        left_cov  = np.sum(cols <  sidewalk_mask.shape[1] // 2)
+                        right_cov = np.sum(cols >= sidewalk_mask.shape[1] // 2)
+                        balance = min(left_cov, right_cov) / max(left_cov, right_cov, 1)
                         score = balance
                     else:
                         score = 0.5
-                    
                     print(f"Heading {heading}°: Center found (score={score:.2f})")
-                    
                     if score > best_score:
                         best_score = score
                         best_heading = heading
                 else:
                     print(f"Heading {heading}°: No center detected")
-                    
             except Exception as e:
                 print(f"Heading {heading}°: Error - {e}")
                 continue
-        
+
         if best_heading is not None:
             print(f"Best center heading: {best_heading}° (score={best_score:.2f})")
         else:
             print("No street center found in test angles")
-        
+
         return best_heading
 
     def _generate_heading_ranges(
