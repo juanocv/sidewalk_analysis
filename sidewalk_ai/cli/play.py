@@ -157,7 +157,7 @@ def _print_result(obj):
               f"Median corridor={med:.2f} m | "
               f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
         # opcional: ainda pode mostrar a fração ≥ threshold, mas sem sugerir que afeta o ranking
-        # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_120m_ratio:.0%}")
+        # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
         if acc.per_type:
             print("  Per-type corridor medians (m):")
             for t, m in acc.per_type.items():
@@ -274,7 +274,7 @@ def _print_tuple_results(obj):
                  f"Median corridor={med:.2f} m | "
                  f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
            # opcional:
-           # print(f"           Share of corridors ≥{thr:.2f} m = {g.meets_120m_ratio:.0%}")
+           # print(f"           Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
        # optional JSON
        if getattr(args, "metrics_json", None):
            def _acc_to_dict(a):

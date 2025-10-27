@@ -1,13 +1,13 @@
 from __future__ import annotations
 import cv2, os
-import base64
-import numpy as np
-import re
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from sidewalk_ai.io.image_io import (
+    objects_overlay_bgr, png_b64, png_triplet, sample_indices
+)
 from sidewalk_ai.processing.accessibility import (
-    compute_single_view_metrics, compute_multiview_metrics
+    corridor_block, round_half_up, types_summary, compute_single_view_metrics, compute_multiview_metrics
 )
 from pydantic import BaseModel, Field
 import sidewalk_ai as sw
@@ -148,8 +148,8 @@ class SingleResp(BaseModel):
     margin_m: float
     clearances: list["ClearanceItem"] = []
     gsv_png_b64:  str  | None = None
-    mask_png_b64:  str | None = None
-    overlay_png_b64: str  | None = None
+    overlay_sidewalk_png_b64: str  | None = None
+    overlay_obstacle_png_b64: str  | None = None
     accessibility: dict | None = None
 
 class MultiSideCorridor(BaseModel):
@@ -178,7 +178,6 @@ class MultiRespSlim(BaseModel):
     # imagens (opcional)
     samples_left: list[dict] | None = None
     samples_right: list[dict] | None = None
-    obstacle_images: list[str] | None = None
 
 class ClearanceItem(BaseModel):
     label: str
@@ -187,8 +186,6 @@ class ClearanceItem(BaseModel):
     total_m: float | None = None
     obs_width: float | None = None
 
-def _png_b64(arr: np.ndarray) -> str:
-    return base64.b64encode(cv2.imencode(".png", arr)[1]).decode()
 # ------------------------------------------------------------------ #
 # shared helper – runs the pipeline exactly once                     #
 # ------------------------------------------------------------------ #
@@ -225,28 +222,28 @@ def analyse_single(req: AddressSingleReq):
 
     # single-view → sempre um Result
     res_obj = res
-    gsv_png_b64 = None; mask_png_b64 = None; overlay_png_b64 = None
+    gsv_png_b64 = None; overlay_sidewalk_png_b64 = None; overlay_obstacle_png_b64 = None
 
     if req.return_mask and getattr(res_obj, "rgb_image", None) is not None:
         rgb_bgr = cv2.cvtColor(res_obj.rgb_image, cv2.COLOR_RGB2BGR)
-        gsv_png_b64  = _png_b64(rgb_bgr)
-        mask_u8      = (res_obj.sidewalk_mask * 255).astype("uint8")
-        mask_png_b64 = _png_b64(mask_u8)
-        overlay      = rgb_bgr.copy()
+        gsv_png_b64  = png_b64(rgb_bgr)
+
+        # 1) overlay da calçada → overlay_sidewalk_png_b64
+        overlay = rgb_bgr.copy()
         overlay[res_obj.sidewalk_mask.astype(bool)] = (0, 255, 0)
-        overlay      = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
-        overlay_png_b64 = _png_b64(overlay)
+        overlay = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
+        overlay_sidewalk_png_b64 = png_b64(overlay)
+
+        # 2) overlay de objetos por tipo → vai em overlay_obstacle_png_b64
+        obj_overlay = objects_overlay_bgr(rgb_bgr, getattr(res_obj, "obstacles", None))
+        overlay_obstacle_png_b64 = png_b64(obj_overlay)
 
     # acessibilidade (single)
     accessibility = None
     try:
         acc = compute_single_view_metrics(getattr(res_obj, 'clearances', []) or [],
                                           min_clear_required_m=req.min_clear)
-        accessibility = {
-            "min_clear_required_m": acc.min_clear_required_m,
-            "global_stats": acc.global_stats.__dict__,
-            "per_type": {k: v.__dict__ for k, v in acc.per_type.items()},
-        }
+        accessibility = acc.to_dict()
     except Exception:
         accessibility = None
 
@@ -265,64 +262,16 @@ def analyse_single(req: AddressSingleReq):
         margin_m = getattr(res_obj.width, 'margin_m', 0.0),
         clearances      = clearance_items,
         gsv_png_b64     = gsv_png_b64,
-        mask_png_b64    = mask_png_b64,
-        overlay_png_b64 = overlay_png_b64,
+        overlay_sidewalk_png_b64 = overlay_sidewalk_png_b64,
+        overlay_obstacle_png_b64 = overlay_obstacle_png_b64,
         accessibility   = accessibility,
     )
 
-_LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
-def _label_type(s: str) -> str:
-    m = _LABEL_TYPE_RE.match(s or "")
-    return m.group(1).strip().lower() if m else (s or "").lower()
-
-def _round_half_up(x: float) -> int:
-    return int(np.floor(x + 0.5))
-
-def _types_summary(res_list):
-    """
-    res_list: lista de Results de um lado (LEFT/RIGHT).
-    Retorna {tipo: {"prevalence": float 0..1, "typical_count_when_present": int}}
-    - só inclui tipos que aparecem em pelo menos 1 vista (evita zeros “ruins”).
-    """
-    n = len(res_list) or 0
-    if n == 0:
-        return {}
-
-    by_type_counts: dict[str, list[int]] = {}  # {tipo: [c0, c1, ... c{n-1}]}
-
-    for i, r in enumerate(res_list):
-        # 1) começa assumindo 0 para todos os tipos já vistos
-        for t in by_type_counts.keys():
-            by_type_counts[t].append(0)
-
-        # 2) conta tipos desta vista
-        counts: dict[str, int] = {}
-        for c in getattr(r, "clearances", []) or []:
-            t = _label_type(c.label)
-            counts[t] = counts.get(t, 0) + 1
-
-        # 3) para tipos novos, crie histórico de zeros das vistas passadas e
-        #    acrescente o valor corrente; para tipos já conhecidos, sobrescreva o 0 recém-apensado
-        for t, cnt in counts.items():
-            if t not in by_type_counts:
-                by_type_counts[t] = [0] * i  # zeros para as i vistas anteriores
-                by_type_counts[t].append(cnt)
-            else:
-                by_type_counts[t][-1] = cnt  # substitui o 0 desta vista pelo cnt
-
-    out = {}
-    for t, seq in by_type_counts.items():
-        # seq tem tamanho n (uma contagem por vista)
-        if max(seq) == 0:
-            continue  # não reporta tipos que nunca aparecem (segurança extra)
-        prevalence = float(np.mean([1 if v > 0 else 0 for v in seq]))
-        cond = [v for v in seq if v > 0]
-        p50 = float(np.median(cond))
-        out[t] = {
-            "prevalence": prevalence,
-            "typical_count_when_present": _round_half_up(p50),
-        }
-    return out
+# ------------------------------------------------------------------ #
+# POST /analyse/multi                                               #
+# ------------------------------------------------------------------ #
+# # helper functions                                                #
+# ------------------------------------------------------------------ #
 
 @app.post("/analyse/multi", response_model=MultiRespSlim)
 def analyse_multi(req: AddressMultiReq):
@@ -340,7 +289,6 @@ def analyse_multi(req: AddressMultiReq):
 
     multi_metadata = res.get('metadata') or {}
     per_heading    = res.get('per_heading') or []
-    obstacle_images= res.get('obstacle_images') or []
     left, right    = res.get('results', ([], []))
 
     # ---------- acessibilidade (LEFT/RIGHT/ALL) ----------
@@ -349,15 +297,6 @@ def analyse_multi(req: AddressMultiReq):
     except Exception:
         raise HTTPException(500, "Failed to compute multi-view accessibility metrics")
 
-    def _corridor_block(acc_side):
-        g = acc_side.global_stats
-        # g.free_total_m tem as estatísticas do corredor (pool L∪R)
-        return {
-            "median_m": g.free_total_m.get("median", float("nan")),
-            "meets_ratio": g.meets_120m_ratio,
-            "rating": g.rating,
-        }
-
     # ---------- sumarização por lado (formato compacto) ----------
     per_side = {}
 
@@ -365,13 +304,13 @@ def analyse_multi(req: AddressMultiReq):
         lg = acc["LEFT"].global_stats
         per_side["LEFT"] = {
             "median_width": None,  # injeta abaixo com meta
-            "corridor": _corridor_block(acc["LEFT"]),
+            "corridor": corridor_block(acc["LEFT"]),
             "obstacles": {
                 "typical_obstacles_per_view": (
                     lg.avg_obstacles_per_view_rounded
-                    or _round_half_up(lg.avg_obstacles_per_view or 0.0)
+                    or round_half_up(lg.avg_obstacles_per_view or 0.0)
                 ),
-                "types": _types_summary(left) or None,  # {"tree": {"prevalence": ..., "typical_count_when_present": ...}, ...}
+                "types": types_summary(left) or None,  # {"tree": {"prevalence": ..., "typical_count_when_present": ...}, ...}
             },
         }
 
@@ -379,13 +318,13 @@ def analyse_multi(req: AddressMultiReq):
         rg = acc["RIGHT"].global_stats
         per_side["RIGHT"] = {
             "median_width": None,
-            "corridor": _corridor_block(acc["RIGHT"]),
+            "corridor": corridor_block(acc["RIGHT"]),
             "obstacles": {
                 "typical_obstacles_per_view": (
                     rg.avg_obstacles_per_view_rounded
-                    or _round_half_up(rg.avg_obstacles_per_view or 0.0)
+                    or round_half_up(rg.avg_obstacles_per_view or 0.0)
                 ),
-                "types": _types_summary(right) or None,
+                "types": types_summary(right) or None,
             },
         }
 
@@ -402,41 +341,21 @@ def analyse_multi(req: AddressMultiReq):
     all_views = {
         "corridor": {
             "median_m": g_all.free_total_m.get("median", float("nan")),
-            "meets_ratio": g_all.meets_120m_ratio,
+            "meets_ratio": g_all.meets_ratio,
             "rating": g_all.rating,
         },
         "typical_obstacles_per_view": (
             g_all.avg_obstacles_per_view_rounded
-            or _round_half_up(g_all.avg_obstacles_per_view or 0.0)
+            or round_half_up(g_all.avg_obstacles_per_view or 0.0)
         ),
     }
-
-    # ---------- helpers p/ imagens de amostra (mantidos) ----------
-    def _png_triplet(result):
-        if getattr(result, "rgb_image", None) is None:
-            return None
-        rgb_bgr = cv2.cvtColor(result.rgb_image, cv2.COLOR_RGB2BGR)
-        mask_u8 = (result.sidewalk_mask * 255).astype("uint8")
-        overlay = rgb_bgr.copy()
-        overlay[result.sidewalk_mask.astype(bool)] = (0,255,0)
-        overlay = cv2.addWeighted(overlay, 0.4, rgb_bgr, 0.6, 0)
-        return {
-            "gsv_png_b64":  _png_b64(rgb_bgr),
-            "mask_png_b64": _png_b64(mask_u8),
-            "overlay_png_b64": _png_b64(overlay),
-        }
-
-    def _sample_indices(n, k=3):
-        if n<=0: return []
-        if n<=k: return list(range(n))
-        return sorted(set([n//4, n//2, (3*n)//4]))[:k]
 
     samples_left = samples_right = None
     if req.return_mask:
         if left:
-            samples_left  = [s for i in _sample_indices(len(left), 3) if (s := _png_triplet(left[i]))]
+            samples_left  = [s for i in sample_indices(len(left), 3) if (s := png_triplet(left[i]))]
         if right:
-            samples_right = [s for i in _sample_indices(len(right), 3) if (s := _png_triplet(right[i]))]
+            samples_right = [s for i in sample_indices(len(right), 3) if (s := png_triplet(right[i]))]
 
     # ---------- retorno final ajustado ao schema ----------
     return MultiRespSlim(
@@ -446,7 +365,6 @@ def analyse_multi(req: AddressMultiReq):
         per_heading=per_heading,
         samples_left=samples_left,
         samples_right=samples_right,
-        obstacle_images=obstacle_images,
     )
 
 # ------------------------------------------------------------------ #
