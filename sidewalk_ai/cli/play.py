@@ -15,10 +15,9 @@ Examples
 
 from flask import json
 import sidewalk_ai as sw
-from sidewalk_ai.cli._builder import build_segmenter
 from sidewalk_ai.cli._debug_viz import write_debug_sheet
 from sidewalk_ai.cli._argparse import build_parser
-from sidewalk_ai.models.factory import build_depth 
+from sidewalk_ai.core.pipeline_manager import pipeline_manager
 import numpy as np
 from pathlib import Path
 from sidewalk_ai.api.request import from_cli_args, run_pipeline
@@ -42,16 +41,41 @@ os.environ.setdefault("SWAI_FALLBACK_SCALE", str(args.fallback_scale))
 if args.force_fallback:
     os.environ["SWAI_FORCE_FALLBACK"] = "1"
 
-# ──────────────────────── Build pipeline ───────────────────────────
-segmenter = build_segmenter(args.seg, ckpt=args.ckpt,
-                            dl_model=args.deeplab_model,
-                            device=args.device,
-                            method=args.ensemble_method)
-depth = build_depth(args.depth, variant=args.zoe_variant, device=args.device)
-streetview = sw.StreetViewClient()
-pipe       = sw.SidewalkPipeline(segmenter=segmenter,
-                                 depth=depth,
-                                 streetview=streetview)
+# ──────────────────────── Build pipeline using Manager ───────────────────────────
+segmenter_kwargs = {
+    "device": args.device,
+}
+
+# Only add OneFormer-specific parameters if they exist and are relevant
+if hasattr(args, "seg_task"):
+    segmenter_kwargs["seg_task"] = args.seg_task
+if hasattr(args, "dual_pass"):
+    segmenter_kwargs["dual_pass_for_instances"] = args.dual_pass
+if hasattr(args, "fuse_stuff"):
+    segmenter_kwargs["fuse_stuff"] = args.fuse_stuff
+
+# Handle deeplab-specific parameters separately - only include for deeplab backend
+if args.seg == "deeplab":
+    if hasattr(args, 'ckpt') and args.ckpt:
+        segmenter_kwargs["ckpt_path"] = args.ckpt
+    if hasattr(args, 'deeplab_model') and args.deeplab_model:
+        segmenter_kwargs["model_name"] = args.deeplab_model
+    # Only include 'method' for deeplab since OneFormer doesn't accept it
+    if hasattr(args, 'ensemble_method') and args.ensemble_method:
+        segmenter_kwargs["method"] = args.ensemble_method
+
+depth_kwargs = {"device": args.device}
+
+# Get pipeline from manager (will use cached models)
+pipe = pipeline_manager.get_pipeline(
+    segmenter_backend=args.seg,
+    depth_backend=args.depth,
+    depth_variant=getattr(args, "zoe_variant", None),
+    segmenter_kwargs=segmenter_kwargs,
+    depth_kwargs=depth_kwargs,
+    refine=getattr(args, "refine", True),
+    fuse_method=getattr(args, "ensemble_method", None), 
+)
 
 # ── run ────────────────────────────────────────────────────────────
 if args.image:
@@ -235,7 +259,7 @@ def _print_tuple_results(obj):
                         # create a synthetic Path so write_debug_sheet can build a filename
                         img_path = Path(f"{side_name}_{i}.png")
                     args.image = img_path
-                    write_debug_sheet(res, pipe, args, segmenter)
+                    write_debug_sheet(res, pipe, args, pipe.segmenter)  # Use pipe.segmenter instead of segmenter
                 except Exception as e:
                     print(f"Failed to write debug sheet for {side_name}#{i}: {e}")
                 finally:
@@ -320,7 +344,7 @@ if args.debug:
                 args.image = res.img_path
             else:
                 args.image = Path("singleview.png")
-        write_debug_sheet(res, pipe, args, segmenter)
+        write_debug_sheet(res, pipe, args, pipe.segmenter) 
     except Exception as e:
         print(f"Failed to write debug sheet: {e}")
     finally:

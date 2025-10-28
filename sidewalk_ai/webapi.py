@@ -10,9 +10,8 @@ from sidewalk_ai.processing.accessibility import (
     corridor_block, round_half_up, types_summary, compute_single_view_metrics, compute_multiview_metrics
 )
 from pydantic import BaseModel, Field
-import sidewalk_ai as sw
-from sidewalk_ai.models.factory import build_depth 
 from sidewalk_ai.api.request import from_api_single, from_api_multi, run_pipeline
+from sidewalk_ai.core.pipeline_manager import pipeline_manager  # ADD THIS
 
 # Map ZoeDepth variant names to their canonical forms
 NAME_MAP = {
@@ -31,33 +30,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # define a lifespan context manager to load once
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    seg = sw.build_segmenter("oneformer")       # reused by every pipe
-    sv  = sw.StreetViewClient()  # reused by every pipe
-    app.state.sv = sv
-
-    # ---- depth back-ends ------------------------------------------------
-    depth_midas = build_depth("midas")
-    depth_zoe   = build_depth(
-    "zoe",
-    variant=NAME_MAP.get(
-        os.getenv("SWAI_ZOE_VARIANT", "zoed_n"), "zoed_n"
-    ),
-    )
-
-    # ---- build four pipelines (depth × refine) -------------------------
-    def _make(depth_obj, refine: bool):
-        return sw.SidewalkPipeline(
-            segmenter=seg, depth=depth_obj, streetview=sv, refine=refine
-        )
-
-    app.state.pipes = {
-        ("midas", True):  _make(depth_midas, True),
-        ("midas", False): _make(depth_midas, False),
-        ("zoe",   True):  _make(depth_zoe,   True),
-        ("zoe",   False): _make(depth_zoe,   False),
-    }
+    # The pipeline manager will load models on-demand and cache them
+    print("Initializing Pipeline Manager...")
     yield
-    # (Optional) Shutdown logic here
+    # Optional cleanup
+    pipeline_manager.clear_cache()
 
 app = FastAPI(
     title="Sidewalk-AI",
@@ -186,26 +163,22 @@ class ClearanceItem(BaseModel):
     total_m: float | None = None
     obs_width: float | None = None
 
-# ------------------------------------------------------------------ #
-# shared helper – runs the pipeline exactly once                     #
-# ------------------------------------------------------------------ #
 def _pick_depth_pipe(req_depth: str, req_refine: bool, zoe_variant: str | None):
-    # Build or pick the appropriate pipeline from app.state.pipes
-    key = (req_depth, req_refine)
-    if key not in app.state.pipes:
-        raise HTTPException(400, f"Depth backend '{req_depth}' not available")
-
-    pipe = app.state.pipes[key]
-
-    # optional on-the-fly Zoe variant override (replace depth in the selected pipe)
+    # Use Pipeline Manager to get the appropriate pipeline
+    depth_variant = None
     if req_depth == "zoe" and zoe_variant:
-        v = NAME_MAP.get(zoe_variant, None)
-        if v is None:
+        depth_variant = NAME_MAP.get(zoe_variant, None)
+        if depth_variant is None:
             raise HTTPException(400, "zoe_variant must be one of " f"{', '.join(VALID_ZOE)}")
-        depth_obj = build_depth("zoe", variant=v)
-        app.state.pipes[key] = sw.SidewalkPipeline(segmenter=pipe.segmenter, depth=depth_obj, streetview=app.state.sv, refine=req_refine)
-        pipe = app.state.pipes[key]
-
+    
+    # Get pipeline from manager (will use cached models)
+    pipe = pipeline_manager.get_pipeline(
+        segmenter_backend="oneformer",
+        depth_backend=req_depth,
+        depth_variant=depth_variant or "zoed_n",
+        refine=req_refine,
+    )
+    
     return pipe
 
 @app.post("/analyse/single", response_model=SingleResp)
@@ -270,9 +243,6 @@ def analyse_single(req: AddressSingleReq):
 # ------------------------------------------------------------------ #
 # POST /analyse/multi                                               #
 # ------------------------------------------------------------------ #
-# # helper functions                                                #
-# ------------------------------------------------------------------ #
-
 @app.post("/analyse/multi", response_model=MultiRespSlim)
 def analyse_multi(req: AddressMultiReq):
     pipe = _pick_depth_pipe(req.depth, req.refine, req.zoe_variant)
@@ -373,6 +343,12 @@ def analyse_multi(req: AddressMultiReq):
 @app.get("/ping", tags=["health"])
 def ping():
     return {"ok": True}
+
+@app.get("/cache/clear", tags=["admin"])
+def clear_cache():
+    """Clear the model and pipeline cache (useful for memory management)"""
+    pipeline_manager.clear_cache()
+    return {"status": "cache cleared"}
 
 # Pydantic forward refs (para versões 1 e 2)
 try:

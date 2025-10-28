@@ -34,10 +34,11 @@ def build_segmenter(
     **kwargs: Any,
 ):
     
+    cache_key = None
     if use_cache:
         cache_key = _get_cache_key(f"segmenter:{backend}", **kwargs)
-    if cache_key in _MODEL_CACHE:
-        return _MODEL_CACHE[cache_key]
+        if cache_key in _MODEL_CACHE:
+            return _MODEL_CACHE[cache_key]
     
     if backend == "oneformer":
         instance = OneFormerSegmenter(**kwargs)
@@ -92,7 +93,8 @@ def build_depth(
     cache_kwargs.pop('device', None)
     if variant is not None:
         cache_kwargs['variant'] = variant
-        
+
+    cache_key = None    
     if use_cache:
         cache_key = _get_cache_key(f"depth:{backend}", **cache_kwargs)
         if cache_key in _MODEL_CACHE:
