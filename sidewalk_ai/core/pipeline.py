@@ -29,11 +29,10 @@ WIDTH_PARAMS = {
     "adaptive_pct": (0.60, 0.95),   # ↓ faixa mais estreita (mais perto do observador)
     "du_range_px": (20, 220),       # ↓ corta near-perpendicular extremo
     "parallax_range": (0.05, 0.45), # ↓ evita “paralaxe exuberante” instável
-    "continuity_min_frac": 0.75,    # ↑ exige componente dominante mais claro
-    "max_gap_cols": 40,             # ↓ menos tolerância a máscaras “partidas”
     "min_valid_rows": 7,            # ↑ mediana mais robusta
     "divergence_pct": 0.25,         # ↓ troca p/ geom mais cedo quando divergir
     "use_data_driven_margin": True,
+    "bottom_ignore_px": 20,         # ignora a faixa com a logo
 }
 
 # --------------------------------------------------------------------------- #
@@ -118,7 +117,7 @@ class SidewalkPipeline:
 
         req = ImageRequest(lat, lon, heading=int(heading), pitch=pitch, fov=fov)
         img_path = self.sv.fetch(req)
-        return self._analyse_path(img_path)
+        return self._analyse_path(img_path, pitch=pitch, fov=fov)
 
     def analyse_address_multiview(
         self,
@@ -148,7 +147,7 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                left_estimates.append(self._analyse_path(img_path))
+                left_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
 
@@ -156,7 +155,7 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                right_estimates.append(self._analyse_path(img_path))
+                right_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
 
@@ -179,7 +178,7 @@ class SidewalkPipeline:
                 use_heading = center if center is not None else 0
             req = ImageRequest(lat, lon, heading=int(use_heading), pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
-            return self._analyse_path(img_path)
+            return self._analyse_path(img_path, pitch=pitch, fov=fov)
 
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
         if center_heading is None:
@@ -196,7 +195,7 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                left_estimates.append(self._analyse_path(img_path))
+                left_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
 
@@ -204,7 +203,7 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                right_estimates.append(self._analyse_path(img_path))
+                right_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
 
@@ -318,7 +317,7 @@ class SidewalkPipeline:
     # ------------------------------------------------------------------ #
     # Core implementation (private)                                      #
     # ------------------------------------------------------------------ #
-    def _analyse_path(self, img_path: Path) -> Result:
+    def _analyse_path(self, img_path: Path, *, pitch: int = 0, fov: int = 90) -> Result:
         img_rgb = read_rgb(img_path)
 
         #initial_time = time.time()
@@ -362,60 +361,10 @@ class SidewalkPipeline:
         #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
         #                    "depth_metric": bool(metric)})
 
-        '''
-        # --- optional runtime overrides via environment variables ---
-        import os
-        def _tuple_from_env(key, cast=float):
-            val = os.getenv(key, None)
-            if not val:
-                return None
-            try:
-                a, b = val.split(",")
-                return (cast(a.strip()), cast(b.strip()))
-            except Exception:
-                return None
-
-        kw = {}
-        band_mode = os.getenv("SWAI_BAND_MODE", None)
-        if band_mode in ("adaptive","fixed"):
-            kw["band_mode"] = band_mode
-
-        t = _tuple_from_env("SWAI_DU_RANGE", int)
-        if t: kw["du_range_px"] = t
-
-        t = _tuple_from_env("SWAI_PARALLAX_RANGE", float)
-        if t: kw["parallax_range"] = t
-
-        v = os.getenv("SWAI_CONTINUITY_MIN_FRAC", None)
-        if v is not None:
-            try: kw["continuity_min_frac"] = float(v)
-            except: pass
-
-        v = os.getenv("SWAI_MAX_GAP_COLS", None)
-        if v is not None:
-            try: kw["max_gap_cols"] = int(v)
-            except: pass
-
-        v = os.getenv("SWAI_MIN_VALID_ROWS", None)
-        if v is not None:
-            try: kw["min_valid_rows"] = int(v)
-            except: pass
-
-        v = os.getenv("SWAI_DIVERGENCE_PCT", None)
-        if v is not None:
-            try: kw["divergence_pct"] = float(v)
-            except: pass
-
-        v = os.getenv("SWAI_USE_DATA_DRIVEN_MARGIN", None)
-        if v is not None:
-            kw["use_data_driven_margin"] = v.strip() not in ("0","false","False")
-
-        '''
-
         # -------- Width ------------------------------------------------ #
         params = dict(WIDTH_PARAMS)
         #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
-        width_res = compute_width(sidewalk_mask, depth_map, **params)
+        width_res = compute_width(sidewalk_mask, depth_map, pitch_deg=pitch, fov_deg=fov, **params)
        
         #print(f"Width estimation {width_res}")
         #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")

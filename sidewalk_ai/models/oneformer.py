@@ -168,11 +168,11 @@ class OneFormerSegmenter(Segmenter):
                         obstacles.append((f"{name}#ins{seg_i}:{j}", comp))
 
         # ------------------ Passo C: Refinamento ------------------
-        #mask = shave_above_top_envelope(
-        #    sidewalk_raw.astype(np.uint8),
-        #    max_above_px=None,        
-        #    smooth_kernel=11,
-        #    min_cols=30,
-        #).astype(bool)
+        mask = shave_above_top_envelope(
+            sidewalk_raw.astype(np.uint8),
+            max_above_px=None,        
+            smooth_kernel=11,
+            min_cols=30,
+        ).astype(bool)
 
-        return sidewalk_raw, seg_map, seg_info, obstacles
+        return mask, seg_map, seg_info, obstacles

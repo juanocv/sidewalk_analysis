@@ -191,12 +191,12 @@ def run_pipeline(pipe, cfg: RequestConfig):
     if cfg.lat is not None and cfg.lon is not None:
         req = ImageRequest(lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path)
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov)
 
     if cfg.address:
         lat, lon = pipe.sv.geocode(cfg.address)
         req = ImageRequest(lat=lat, lon=lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path)
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov)
 
     raise ValueError("Either address or lat+lon required")

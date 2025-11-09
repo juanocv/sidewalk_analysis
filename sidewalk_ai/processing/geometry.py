@@ -24,7 +24,7 @@ def _swai_log(tag, payload):
 
 # ------------------ Camera and image parameters ------------------ #
 ORIG_SIZE = (600, 400)      # Street-View static API
-CROP_BOTTOM = 20            # logo strip that we remove
+CROP_BOTTOM = 0            # logo strip that we remove
 CAM_HEIGHT_M = 1.75
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +147,7 @@ def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0,
     return X, Z
 
 
-def _intrinsics_after_crop(W: int = 600, H_crop: int = 380,
-                           crop_bottom: int = 20, fov_deg: float = 75.0) -> tuple[float, float, float, float]:
+def _intrinsics_after_crop(W: int = 600, fov_deg: float = 90.0) -> tuple[float, float, float, float]:
     """
     Returns fx, fy, cx, cy *in cropped coordinates* but referenced to the
     original optical centre (cy = 200 px).
@@ -198,10 +197,9 @@ def aggregate_headings(widths_per_heading, min_k=5):
 def compute_width(
     sidewalk:      np.ndarray,          # bool mask (H×W)
     depth:         np.ndarray | None = None,
-    *,                                  # keyword-only
     pitch_deg:     float = -10.0,
-    skip_if_dual:  bool = True,
-    FOV_deg:       float = 75.0,
+    fov_deg:       float = 90.0,
+    *,                                  # keyword-only
     band_frac:     tuple[float, float] = (0.50, 1.00),
     err_pct:       float = 25.0,
     # --- knobs (quality gating & robustness) ---
@@ -209,11 +207,10 @@ def compute_width(
     adaptive_pct:  tuple[float, float] = (0.60, 0.95),
     du_range_px:   tuple[int, int] = (20, 220),         # ↓ mais estrito
     parallax_range:tuple[float, float] = (0.05, 0.45),  # ↓ mais estrito
-    continuity_min_frac: float = 0.75,                  # ↑
-    max_gap_cols:  int   = 40,                          # ↓
     min_valid_rows:int   = 7,                           # ↑
     use_data_driven_margin: bool = True,
     divergence_pct: float = 0.25,                       # ↓
+    bottom_ignore_px: int = 20,                          # ignora a faixa com a logo
 ) -> WidthResult:
     """
     Robust width estimation with:
@@ -223,6 +220,7 @@ def compute_width(
       • data-driven uncertainty (IQR) when available.
     """
     H, W = sidewalk.shape
+    H_eff = max(1, int(H) - int(bottom_ignore_px))  # ignora rodapé (logo)
     sidewalk = sidewalk.astype(bool)
 
     # heurísticas suaves para frames sem parallax
@@ -250,11 +248,11 @@ def compute_width(
     total_rows_considered = 0
 
     # 0) intrinsics and horizon
-    fx, fy, cx, cy = _intrinsics_after_crop(W, H, CROP_BOTTOM, FOV_deg)
+    fx, fy, cx, cy = _intrinsics_after_crop(W, fov_deg)
     v_h = cy - fy * np.tan(np.radians(pitch_deg))
 
     _swai_log("intrinsics", {
-    "W": int(W), "H": int(H), "FOV_deg": float(FOV_deg), "pitch_deg": float(pitch_deg),
+    "W": int(W), "H": int(H), "FOV_deg": float(fov_deg), "pitch_deg": float(pitch_deg),
     "fx": float(fx), "fy": float(fy), "cx": float(cx), "cy": float(cy), "v_h": float(v_h)
     })
 
@@ -266,31 +264,31 @@ def compute_width(
             yq_hi = int(np.percentile(ys_mask, adaptive_pct[1] * 100))  # ~p95
             ymin  = max(yq_lo, int(v_h) + 5)
             # altura mínima da banda (dinâmica: 5% de H, mas nunca <12 px)
-            MIN_BAND_PX = max(12, int(0.05 * H))
+            MIN_BAND_PX = max(12, int(0.05 * H_eff))
             ymax  = max(ymin + MIN_BAND_PX, yq_hi)  # ← antes era ymin + 1
-            y0, y1 = ymin, min(H, ymax)
+            y0, y1 = ymin, min(H_eff, ymax)
         else:
             y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
             y0 = max(y0, int(v_h) + 5)
             # também respeite a altura mínima aqui
-            MIN_BAND_PX = max(12, int(0.05 * H))
+            MIN_BAND_PX = max(12, int(0.05 * H_eff))
             if (y1 - y0) < MIN_BAND_PX:
-                y1 = min(H, y0 + MIN_BAND_PX)
+                y1 = min(H_eff, y0 + MIN_BAND_PX)
     else:
         y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
         y0 = max(y0, int(v_h) + 5)
-        MIN_BAND_PX = max(12, int(0.05 * H))
+        MIN_BAND_PX = max(12, int(0.05 * H_eff))
         if (y1 - y0) < MIN_BAND_PX:
-            y1 = min(H, y0 + MIN_BAND_PX)
+            y1 = min(H_eff, y0 + MIN_BAND_PX)
 
     # se por qualquer motivo a banda ainda ficou pequena, expanda simetricamente
     if (y1 - y0) < MIN_BAND_PX:
         deficit = MIN_BAND_PX - (y1 - y0)
         grow = (deficit + 1) // 2
         y0 = max(int(v_h) + 5, y0 - grow)
-        y1 = min(H, y1 + grow)
+        y1 = min(H_eff, y1 + grow)
         if (y1 - y0) < MIN_BAND_PX:  # último reforço
-            y1 = min(H, y0 + MIN_BAND_PX)
+            y1 = min(H_eff, y0 + MIN_BAND_PX)
 
     band = sidewalk[y0:y1].astype(np.uint8)
     band_cov = float(band.sum()) / float(band.size) if band.size else 0.0
@@ -862,13 +860,14 @@ def compute_clearances(
 # 3)  Internal helpers (kept private)
 # --------------------------------------------------------------------------- #
 
+'''
 def compute_width_from_curbs(
     mask: np.ndarray,
     top: tuple[float, float],
     bot: tuple[float, float],
     *,
     pitch_deg: float = -10.0,
-    FOV_deg:  float = 75.0,
+    FOV_deg:  float = 90.0,
 ) -> WidthResult:
     """Mede a largura da calçada a partir das guias já refinadas."""
     H, W = mask.shape
@@ -892,3 +891,4 @@ def ortho_distance(a1,c1, a2,c2):
     """
     a = 0.5*(a1 + a2)
     return abs(c2 - c1) / np.sqrt(1 + a*a)
+'''

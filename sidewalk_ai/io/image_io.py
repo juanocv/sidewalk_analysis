@@ -33,7 +33,7 @@ _LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
 
 class Settings(BaseSettings):
     """Central place for image-loading defaults."""
-    auto_crop_google_logo: bool = True
+    auto_crop_google_logo: bool = False
     google_bar_height_px: int   = 20          # adjust if Google changes UI
     class Config:
         env_prefix = "SWAI_IMG_"
