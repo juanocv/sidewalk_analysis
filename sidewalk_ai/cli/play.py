@@ -20,6 +20,7 @@ from sidewalk_ai.cli._debug_viz import write_debug_sheet
 from sidewalk_ai.cli._argparse import build_parser
 from sidewalk_ai.models.factory import build_depth 
 import numpy as np
+import time
 from pathlib import Path
 from sidewalk_ai.api.request import from_cli_args, run_pipeline
 from sidewalk_ai.processing.accessibility import (
@@ -27,9 +28,11 @@ from sidewalk_ai.processing.accessibility import (
    compute_multiview_metrics,
 )
 
+initial_time = time.time()
 # ───────────────────────── CLI args ────────────────────────────────
 args = build_parser().parse_args()
 args.outdir.mkdir(exist_ok=True, parents=True)
+print(f"CLI argument parsing took {time.time() - initial_time:.4f} seconds")
 
 # ──────────────────────── Debug output ─────────────────────────────
 def log(msg: str):
@@ -52,6 +55,7 @@ streetview = sw.StreetViewClient()
 pipe       = sw.SidewalkPipeline(segmenter=segmenter,
                                  depth=depth,
                                  streetview=streetview)
+print(f"Pipeline building took {time.time() - initial_time:.4f} seconds")
 
 # ── run ────────────────────────────────────────────────────────────
 if args.image:
@@ -96,6 +100,8 @@ if multi_view_meta is not None:
             print(f"  RIGHT median width = {rm[0]:.2f} ± {rm[1]:.2f} m  (headings={counts.get('right',0)})")
         else:
             print(f"  RIGHT no median (headings={counts.get('right',0)})")
+
+print(f"Pipeline run took {time.time() - initial_time:.4f} seconds")
 
 '''
     if args.debug:
@@ -174,7 +180,6 @@ def _print_result(obj):
     except Exception as e:
         print(f"[WARN] failed to compute accessibility metrics for single-view: {e}")
 
-
 def _median_of_estimates(estimates):
     """Return a lightweight median summary (width_m, margin_m) from a list of Result."""
     if not estimates:
@@ -189,7 +194,6 @@ def _median_of_estimates(estimates):
     med_w = float(np.median(widths))
     med_m = float(np.median(margins))
     return med_w, med_m
-
 
 def _print_tuple_results(obj):
     """Print median for each side and all clearances per heading.
@@ -288,12 +292,12 @@ def _print_tuple_results(obj):
     except Exception as e:
        print(f"[WARN] failed to compute accessibility metrics for multi-view: {e}")
 
-
 # Choose printing method based on result type
 if isinstance(res, tuple) and len(res) == 2:
     _print_tuple_results(res)
 else:
     _print_result(res)
+print(f"Result printing took {time.time() - initial_time:.4f} seconds")
     
 # ───────────────────────── Debug sheet ────────────────────────────
 # Always write a debug sheet when --debug is set. For file-based runs the
@@ -325,3 +329,4 @@ if args.debug:
         print(f"Failed to write debug sheet: {e}")
     finally:
         args.image = old_image
+print(f"Debug sheet writing took {time.time() - initial_time:.4f} seconds")
