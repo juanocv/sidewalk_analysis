@@ -209,17 +209,24 @@ def compute_single_view_metrics(
         by_type.setdefault(t, []).append((L_val, R_val, total_val, obs_w))
 
     per_type: Dict[str, PerTypeMetrics] = {}
-    all_total = []
+    all_corridors_all = []
+    all_corridors_pos = []
     all_obsw  = []
 
     for t, rows in by_type.items():
         # Only consider clearances with a valid total_m for statistical metrics
         valid_rows = [r for r in rows if (r[2] is not None and np.isfinite(r[2]))]
 
-        Ls = [r[0] for r in valid_rows if (r[0] is not None and np.isfinite(r[0]))]
-        Rs = [r[1] for r in valid_rows if (r[1] is not None and np.isfinite(r[1]))]
+        Ls = [r[0] for r in valid_rows if (r[0] is not None and np.isfinite(r[0]) and r[0] > 0.0)]
+        Rs = [r[1] for r in valid_rows if (r[1] is not None and np.isfinite(r[1]) and r[1] > 0.0)]
         # pool L∪R from valid rows
-        corridors = [v for r in valid_rows for v in (r[0], r[1]) if (v is not None and np.isfinite(v))]
+        corridors = [
+            v
+            for r in valid_rows
+            for v in (r[0], r[1])
+            if (v is not None and np.isfinite(v))
+        ]
+        corridors_pos = [v for v in corridors if v > 0.0]
         Ws = [float(w) for (_, _, _, w) in rows if (w is not None and np.isfinite(w))]
 
         per_type[t] = PerTypeMetrics(
@@ -230,15 +237,30 @@ def compute_single_view_metrics(
             obs_width_m=_robust_stats(Ws) if Ws else None,
         )
 
-        all_total.extend(corridors)
+        all_corridors_all.extend(corridors)
+        all_corridors_pos.extend(corridors_pos)
         all_obsw.extend(Ws)
 
-    all_corridors = _safe_array(all_total)
-    if all_corridors.size:
-        msk = _iqr_mask(all_corridors)
-        all_corridors = all_corridors[msk] if msk.sum() >= 2 else all_corridors
-        meet_ratio = float(np.mean(all_corridors >= min_clear_required_m))
-        ft_stats = _robust_stats(all_corridors)
+    all_corridors_all_arr = _safe_array(all_corridors_all)
+    all_corridors_pos_arr = _safe_array(all_corridors_pos)
+    if all_corridors_all_arr.size:
+        # Estatísticas robustas (mediana, p10, p90, etc.) usando apenas
+        # corredores > 0 quando existirem; se todos forem zero,
+        # usamos o conjunto completo (mediana=0).
+        if all_corridors_pos_arr.size:
+            ft_stats = _robust_stats(all_corridors_pos_arr)
+        else:
+            ft_stats = dict(
+                count=int(all_corridors_all_arr.size),
+                mean=float(np.mean(all_corridors_all_arr)),
+                median=float(np.median(all_corridors_all_arr)),
+                p10=float(np.percentile(all_corridors_all_arr, 10)),
+                p90=float(np.percentile(all_corridors_all_arr, 90)),
+            )
+
+        # meet_ratio considera TODOS os corredores (incluindo zeros), sem
+        # filtro de IQR, para não subestimar situações com bloqueios totais.
+        meet_ratio = float(np.mean(all_corridors_all_arr >= min_clear_required_m))
         glob = GlobalMetrics(
             total_obstacles=int(sum(len(rows) for rows in by_type.values())),
             free_left_m=_robust_stats([r[0] for rows in by_type.values() for r in rows]),
