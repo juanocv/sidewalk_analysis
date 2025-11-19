@@ -301,13 +301,51 @@ def _print_tuple_results(obj):
        # optional JSON
        if getattr(args, "metrics_json", None):
            def _acc_to_dict(a):
-               return {"min_clear_required_m": a.min_clear_required_m,
-                       "global": a.global_stats.__dict__,
-                       "per_type": {k: v.__dict__ for k, v in a.per_type.items()}}
-           out = {"LEFT":  _acc_to_dict(acc["LEFT"]),
-                   "RIGHT": _acc_to_dict(acc["RIGHT"]),
-                   "ALL":   _acc_to_dict(acc["ALL"])}
-           Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+               return {
+                   "min_clear_required_m": a.min_clear_required_m,
+                   "global": a.global_stats.__dict__,
+                   "per_type": {k: v.__dict__ for k, v in a.per_type.items()},
+               }
+           out = {
+               "LEFT":  _acc_to_dict(acc["LEFT"]),
+               "RIGHT": _acc_to_dict(acc["RIGHT"]),
+               "ALL":   _acc_to_dict(acc["ALL"]),
+           }
+           # Bloco extra: resumo multi-view (largura + nº de headings)
+           mv_block = {}
+           # metadata retornado por run_pipeline (se existir)
+           meta = multi_view_meta.get("metadata") if multi_view_meta is not None else None
+           # n_headings: {"left": N, "right": M}
+           if isinstance(meta, dict) and "n_headings" in meta:
+               mv_block["n_headings"] = meta["n_headings"]
+           # Faixas de largura: preferir o metadata, cair para o cálculo local
+           def _range_to_dict(r):
+               return {"min_m": float(r[0]), "max_m": float(r[1])}
+           lw = meta.get("left_width_range") if isinstance(meta, dict) else None
+           rw = meta.get("right_width_range") if isinstance(meta, dict) else None
+           aw = meta.get("all_width_range") if isinstance(meta, dict) else None
+           # fallback para as faixas calculadas acima na função
+           if lw is None:
+               lw = left_range
+           if rw is None:
+               rw = right_range
+           if aw is None:
+               aw = all_range
+           width_range = {}
+           if lw:
+               width_range["LEFT"] = _range_to_dict(lw)
+           if rw:
+               width_range["RIGHT"] = _range_to_dict(rw)
+           if aw:
+               width_range["ALL"] = _range_to_dict(aw)
+           if width_range:
+               mv_block["width_range_m"] = width_range
+           # Só adiciona o bloco se tiver algo
+           if mv_block:
+               out["multi_view"] = mv_block
+           Path(args.metrics_json).write_text(
+               json.dumps(out, ensure_ascii=False, indent=2)
+           )
     except Exception as e:
        print(f"[WARN] failed to compute accessibility metrics for multi-view: {e}")
 
