@@ -180,38 +180,14 @@ def _print_result(obj):
     except Exception as e:
         print(f"[WARN] failed to compute accessibility metrics for single-view: {e}")
 
-def _median_of_estimates(estimates):
-    """Return a lightweight median summary (width_m, margin_m) from a list of Result."""
-    if not estimates:
-        return None
-    # build (width, margin) pairs and remove zero/None widths
-    pairs = [(e.width.width_m, e.width.margin_m) for e in estimates]
-    pairs = [(w, m) for (w, m) in pairs if w is not None and w != 0]
-    if not pairs:
-        return None
-    widths = [w for (w, m) in pairs]
-    margins = [m for (w, m) in pairs]
-    med_w = float(np.median(widths))
-    med_m = float(np.median(margins))
-    return med_w, med_m
-
 def _print_tuple_results(obj):
     """Print median for each side and all clearances per heading.
 
     obj is (left_list, right_list)
     """
     left, right = obj
-    lef_med = _median_of_estimates(left)
-    rig_med = _median_of_estimates(right)
-
-    if lef_med:
-        print(f"LEFT MEDIAN WIDTH  {lef_med[0]:.2f} ± {lef_med[1]:.2f} m")
-    else:
-        print("LEFT MEDIAN WIDTH  no estimates")
-    if rig_med:
-        print(f"RIGHT MEDIAN WIDTH {rig_med[0]:.2f} ± {rig_med[1]:.2f} m")
-    else:
-        print("RIGHT MEDIAN WIDTH no estimates")
+    #lef_med = _median_of_estimates(left)
+    #rig_med = _median_of_estimates(right)
 
     # Print per-heading clearances and optionally write debug sheets
     def _print_and_debug_list(lst, side_name):
@@ -220,7 +196,9 @@ def _print_tuple_results(obj):
 
         agg = defaultdict(list)  # label -> list of obs_widths
         for i, res in enumerate(lst):
-            print(f"\n{side_name} heading #{i}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
+            heading_deg = getattr(res, "heading", None)
+            heading_str = f" ({heading_deg}°)" if heading_deg is not None else ""
+            print(f"\n{side_name} heading #{i}{heading_str}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
             for c in res.clearances:
                 agg[c.label].append(c.obs_width)
                 val = c.obs_width 

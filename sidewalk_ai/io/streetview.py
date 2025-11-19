@@ -142,7 +142,8 @@ class StreetViewClient:
             msg = resp.json().get("error_message", "")
             raise RuntimeError(f"Street View API error: {msg or resp.text}") from None
         finally:
-            elapsed = (time.perf_counter() - start) * 1000
+            # report elapsed time in seconds (more human-friendly)
+            elapsed_s = (time.perf_counter() - start)
             # You may plug a proper logger here
-            print(f"[streetview] GET {url.split('/')[-1]} – {elapsed:5.1f} ms")
+            print(f"[streetview] GET {url.split('/')[-1]} – {elapsed_s:0.4f} s")
         return resp

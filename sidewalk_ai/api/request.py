@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from time import time
 from typing import Optional
 
 import os
@@ -141,6 +142,7 @@ def run_pipeline(pipe, cfg: RequestConfig):
                 ch = {
                     'side': side_name,
                     'index': i,
+                    'heading_deg': getattr(est, 'heading', None),
                     'width_m': getattr(est.width, 'width_m', None),
                     'margin_m': getattr(est.width, 'margin_m', None),
                     'n_clearances': len(est.clearances) if getattr(est, 'clearances', None) is not None else 0,
@@ -190,13 +192,17 @@ def run_pipeline(pipe, cfg: RequestConfig):
     # multi-heading sampling performed in `analyse_coords`.
     if cfg.lat is not None and cfg.lon is not None:
         req = ImageRequest(lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
+        t0 = time.time()
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov)
+        print(f"Image acquisition took {time.time() - t0:.4f} seconds")
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
 
     if cfg.address:
         lat, lon = pipe.sv.geocode(cfg.address)
         req = ImageRequest(lat=lat, lon=lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
+        t0 = time.time()
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov)
+        print(f"Image acquisition took {time.time() - t0:.4f} seconds")
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
 
     raise ValueError("Either address or lat+lon required")

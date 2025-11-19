@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -50,6 +51,7 @@ class Result:
     img_path: Path | None = None
     rgb_image: np.ndarray | None = None  # H×W×3  uint8 (RGB)
     obstacles: list[tuple[str, np.ndarray]] | None = None
+    heading: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -88,12 +90,14 @@ class SidewalkPipeline:
         streetview: StreetViewClient,
         refine: bool = True,
         fuse_method: str | None = None,
+        initial_time: float = None,
     ) -> None:
         self.segmenter = segmenter
         self.depth_est = depth
         self.sv = streetview
         self.refine = refine
         self.fuse_method = fuse_method
+        self.initial_time = initial_time
 
     # ------------------------------------------------------------------ #
     # Convenience overloads                                              #
@@ -105,6 +109,7 @@ class SidewalkPipeline:
         heading: int | None = None,
         pitch: int = 0,
         fov: int = 90,
+        initial_time: float = None,
     ) -> Result:
         """
         Single-view por endereço. Se heading não for dado, tenta achar o centro
@@ -116,8 +121,16 @@ class SidewalkPipeline:
             heading = center if center is not None else 0
 
         req = ImageRequest(lat, lon, heading=int(heading), pitch=pitch, fov=fov)
+        t0 = time.time()
         img_path = self.sv.fetch(req)
-        return self._analyse_path(img_path, pitch=pitch, fov=fov)
+        print(f"Image acquisition took {time.time() - t0:.4f} seconds")
+        return self._analyse_path(
+            img_path,
+            pitch=pitch,
+            fov=fov,
+            heading=int(heading),
+            initial_time=initial_time or time.time(),
+        )
 
     def analyse_address_multiview(
         self,
@@ -144,18 +157,40 @@ class SidewalkPipeline:
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
         for h in left_headings:
+            print(f"[MULTI-VIEW] analysing LEFT heading {h}°")
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
+            t0 = time.time()
             img_path = self.sv.fetch(req)
+            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
             try:
-                left_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
+                left_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
 
         for h in right_headings:
+            print(f"[MULTI-VIEW] analysing RIGHT heading {h}°")
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
+            t0 = time.time()
             img_path = self.sv.fetch(req)
+            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
             try:
-                right_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
+                right_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
 
@@ -177,8 +212,16 @@ class SidewalkPipeline:
                 center = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
                 use_heading = center if center is not None else 0
             req = ImageRequest(lat, lon, heading=int(use_heading), pitch=pitch, fov=fov)
+            t0 = time.time()
             img_path = self.sv.fetch(req)
-            return self._analyse_path(img_path, pitch=pitch, fov=fov)
+            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
+            return self._analyse_path(
+                img_path,
+                pitch=pitch,
+                fov=fov,
+                heading=int(use_heading),
+                initial_time=time.time(),
+            )
 
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
         if center_heading is None:
@@ -192,18 +235,36 @@ class SidewalkPipeline:
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
         for h in left_headings:
+            print(f"[MULTI-VIEW] analysing LEFT heading {h}°")
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                left_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
+                left_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
                 print(f"Skipping heading {h} (left): {e}")
 
         for h in right_headings:
+            print(f"[MULTI-VIEW] analysing RIGHT heading {h}°")
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                right_estimates.append(self._analyse_path(img_path, pitch=pitch, fov=fov))
+                right_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
                 print(f"Skipping heading {h} (right): {e}")
 
@@ -218,14 +279,20 @@ class SidewalkPipeline:
         *,
         pitch: int = 0,
         fov: int = 90,
+        initial_time: float = None,
         test_angles: list[int] | None = None,
     ) -> int | None:
         """
         Busca um heading que mostre o centro da rua (duas guias visíveis).
         Retorna None se não achar em `test_angles`.
         """
+        
         if test_angles is None:
             test_angles = [0, 90, 180, 270]
+
+        if initial_time is None:
+            # Prefer pipeline-wide start time when available; otherwise start now.
+            initial_time = self.initial_time or time.time()
 
         print(f"Testing {len(test_angles)} angles to find street center")
 
@@ -235,7 +302,9 @@ class SidewalkPipeline:
         for heading in test_angles:
             try:
                 req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+                t0 = time.time()
                 img_path = self.sv.fetch(req)
+                print(f"Image acquisition took {time.time() - t0:.4f} seconds")
                 img_rgb = read_rgb(img_path)
 
                 out = self.segmenter.segment(img_rgb)
@@ -268,6 +337,7 @@ class SidewalkPipeline:
         else:
             print("No street center found in test angles")
 
+        print(f"Finding street center took {time.time() - initial_time:.4f} seconds")
         return best_heading
 
     def _generate_heading_ranges(
@@ -317,10 +387,21 @@ class SidewalkPipeline:
     # ------------------------------------------------------------------ #
     # Core implementation (private)                                      #
     # ------------------------------------------------------------------ #
-    def _analyse_path(self, img_path: Path, *, pitch: int = 0, fov: int = 90) -> Result:
+    def _analyse_path(
+        self,
+        img_path: Path,
+        *,
+        pitch: int = 0,
+        fov: int = 90,
+        heading: int | None = None,
+        initial_time: float = None,
+    ) -> Result:
+        if initial_time is None:
+            initial_time = self.initial_time
+        if initial_time is None:
+            initial_time = time.time()
         img_rgb = read_rgb(img_path)
 
-        #initial_time = time.time()
         # -------- Mask Segmentation -------- #
         obstacles = []
         out = self.segmenter.segment(img_rgb)
@@ -336,11 +417,11 @@ class SidewalkPipeline:
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
-        #print(f"Segmentation took {time.time() - initial_time:.4f} seconds")
+        print(f"Segmentation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Mask Refinement -------- #
         refined_mask, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_mask)
-        #print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
+        print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
 
         # -------- Obstacle Extraction (base-only) -------- #
         # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
@@ -348,7 +429,7 @@ class SidewalkPipeline:
         if seg_map is not None and seg_info is not None:
             obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
         # caso extremo: sem panoptic disponível, mantém os do segmenter
-        #print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
+        print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
 
         # -------- Depth ------------------------------------------------ #
         depth_map = self.depth_est.predict(img_rgb)
@@ -367,7 +448,7 @@ class SidewalkPipeline:
         width_res = compute_width(sidewalk_mask, depth_map, pitch_deg=pitch, fov_deg=fov, **params)
        
         #print(f"Width estimation {width_res}")
-        #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
+        print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
@@ -381,7 +462,7 @@ class SidewalkPipeline:
             return_candidates=False,
         )
 
-        #print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
+        print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Return Result --------------------------------------- #
         self._last_rgb = img_rgb  # for debugging
@@ -395,5 +476,6 @@ class SidewalkPipeline:
             seg_info=seg_info,
             img_path=img_path,
             rgb_image=img_rgb,
-            obstacles=obstacles
+            obstacles=obstacles,
+            heading=heading,
         )
