@@ -160,16 +160,56 @@ def _intrinsics_after_crop(W: int = 600, fov_deg: float = 90.0) -> tuple[float, 
     return fx, fy, cx, cy
 
 
-def _has_two_curbs(mask: np.ndarray, min_gap_px=50) -> bool:
-    """
-    Returns True when the mask shows *two* distinct sidewalk regions
-    separated by at least `min_gap_px` columns → likely a parallel view.
-    """
-    cols = np.unique(np.where(mask)[1])
-    if cols.size == 0:         # nothing detected
+def _has_two_curbs(mask: np.ndarray,
+                   min_gap_px: int = 50,
+                   min_frac_rows: float = 0.3,
+                   band: tuple[float, float] = (0.3, 0.9)) -> bool:
+    H, W = mask.shape
+    y0 = int(H * band[0])
+    y1 = int(H * band[1])
+    if y1 <= y0:
         return False
-    split = np.where(np.diff(np.sort(cols)) > min_gap_px)[0]
-    return split.size >= 1
+
+    rows = range(y0, y1)
+    gap_mids = []
+
+    for y in rows:
+        xs = np.where(mask[y])[0]
+        if xs.size < 2:
+            continue
+        xs = np.sort(xs)
+        diffs = np.diff(xs)
+        j = int(np.argmax(diffs))
+        if diffs[j] > min_gap_px:
+            gap_mids.append(0.5 * (xs[j] + xs[j+1]))
+
+    if not gap_mids:
+        return False
+
+    # gap tem que ser frequente (persistente)
+    frac = len(gap_mids) / max(1, len(list(rows)))
+    if frac < min_frac_rows:
+        return False
+
+    # gap tem que estar perto do centro da imagem
+    mid_gap = float(np.median(gap_mids))
+    if abs(mid_gap - W/2) > 0.15 * W:
+        return False
+
+    # e as duas “calçadas” têm que ficar de lados opostos do centro
+    cols = np.unique(np.where(mask)[1])
+    cols = np.sort(cols)
+    diffs = np.diff(cols)
+    k = int(np.argmax(diffs))
+    left_cols  = cols[:k+1]
+    right_cols = cols[k+1:]
+    if not (left_cols.size and right_cols.size):
+        return False
+
+    c1 = left_cols.mean()
+    c2 = right_cols.mean()
+    return (c1 < W/2) and (c2 > W/2)
+
 
 def aggregate_headings(widths_per_heading, min_k=5):
     """
@@ -246,6 +286,7 @@ def compute_width(
 
     parallax_valid_count = 0
     total_rows_considered = 0
+    depth_good_rows = 0
 
     # 0) intrinsics and horizon
     fx, fy, cx, cy = _intrinsics_after_crop(W, fov_deg)
@@ -356,7 +397,7 @@ def compute_width(
     # thresholds adaptativos:
     # - quanto MENOR a cobertura, MENOR a exigência de fração dominante
     # - NÃO descartamos por gap (oclusão é esperada); exigimos só linhas válidas depois
-    cont_min = 0.30 + 0.30 * cov_norm   # 0.30–0.60
+    cont_min = 0.25 + 0.25 * cov_norm   # 0.30–0.60
     if frac_dom < cont_min:
         _swai_log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
         return WidthResult(0.0, 0.0, 0)
@@ -492,10 +533,17 @@ def compute_width(
             ZR = float(depth[iv, iuR])
             if not (np.isfinite(ZL) and np.isfinite(ZR)) or ZL <= 0 or ZR <= 0:
                 continue
-            # parallax score
+            # depth sanity for this row
             zmean = 0.5 * (ZL + ZR)
+            if 0.5 < zmean < 15.0:
+                depth_good_rows += 1
+            # parallax score
             par = abs(ZL - ZR) / zmean if zmean > 1e-6 else 0.0
-            use_depth_row = (par >= par_lo) and (par <= par_hi)
+            if depth_good_rows >= max(3, int(0.5 * min_valid_rows)):
+                # quando a profundidade na banda parece boa, aceite também parallax muito baixo
+                use_depth_row = (par <= par_hi)
+            else:
+                use_depth_row = (par >= par_lo) and (par <= par_hi)
             if use_depth_row:
                 parallax_valid_count += 1
                 XL_d = (uL - cx) * ZL / fx
@@ -627,7 +675,7 @@ def compute_width(
     par_frac = (parallax_valid_count / max(1, total_rows_considered)) if total_rows_considered else 0.0
 
     # --- SUAVE: pós-processamento quando parallax == 0 e NÃO é near-perp dominante ---
-    near_perp_dominante = (near_perp_flag_rows >= max(3, int(0.3 * max(1, rows_seen))))
+    near_perp_dominante = (near_perp_flag_rows >= max(3, int(0.3 * max(1, rows_seen)))) and (depth_good_rows < min_rows_eff)
     widths_geom_final = list(widths_geom_raw)
 
     if (parallax_valid_count == 0) and (not near_perp_dominante) and (len(widths_geom_raw) >= min_rows_eff):
@@ -636,10 +684,20 @@ def compute_width(
             # piso dinâmico sugerido pela profundidade da cena
             Z_soft = min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL) if DEPTH_MED is not None else 5.0
             du_from_depth = (float(fx) / max(1.0, Z_soft)) * 2.1   # largura-prior 2.1 m
-            du_floor = float(np.clip(du_from_depth, SOFT_TARGET_DU_MIN, SOFT_TARGET_DU_MAX))
+
+            # Ajusta o piso/alvo em DU para o FOV atual (baseline ~75°),
+            # de forma que o intervalo [SOFT_TARGET_DU_MIN, SOFT_TARGET_DU_MAX]
+            # represente aproximadamente o mesmo intervalo de larguras em metros.
+            FOV_BASE_DEG = 75.0
+            fx_base = W / (2 * np.tan(np.radians(FOV_BASE_DEG / 2.0)))
+            f_scale = float(fx / fx_base) if fx_base > 0 else 1.0
+            soft_du_min = SOFT_TARGET_DU_MIN * f_scale
+            soft_du_max = SOFT_TARGET_DU_MAX * f_scale
+
+            du_floor = float(np.clip(du_from_depth, soft_du_min, soft_du_max))
 
             # alvo final: mediana clipada pelo piso
-            target_du = float(np.clip(med_du, du_floor, SOFT_TARGET_DU_MAX))
+            target_du = float(np.clip(med_du, du_floor, soft_du_max))
 
             # α adaptativo (0.35–0.85) aumenta quando cobertura baixa e parallax==0
             alpha = float(np.clip(0.35 + 0.40*(1.0 - par_frac) + 0.15*(1.0 - cov_norm), 0.35, 0.85))
@@ -673,7 +731,32 @@ def compute_width(
         iqr = float(np.percentile(a, 75) - np.percentile(a, 25))
         return med, iqr
 
-    med_g, iqr_g = robust_agg(widths_geom_final)
+    # Em vistas diagonais, privilegie as linhas com DU maior
+    # (projeção mais larga, tipicamente mais próximas da câmera).
+    widths_geom_for_agg = widths_geom_final
+    if len(widths_geom_final) >= min_rows_eff and len(widths_geom_final) == len(du_list):
+        du_arr = np.array(du_list, dtype=float)
+        if du_arr.size >= min_rows_eff:
+            du_p10 = float(np.percentile(du_arr, 10))
+            du_p90 = float(np.percentile(du_arr, 90))
+            du_spread = du_p90 - du_p10
+            # spread em DU suficientemente grande sugere gradiente de distância na banda
+            if du_spread >= 10.0 and parallax_valid_count >= 2:
+                # mantém apenas as linhas no terço superior de DU
+                du_thresh = float(np.quantile(du_arr, 0.66))
+                keep = du_arr >= du_thresh
+                if int(keep.sum()) >= max(min_rows_eff, 3):
+                    widths_geom_for_agg = [w for w, k in zip(widths_geom_final, keep) if k]
+                    _swai_log("du_focus", {
+                        "du_p10": du_p10,
+                        "du_p90": du_p90,
+                        "du_spread": du_spread,
+                        "du_thresh": du_thresh,
+                        "kept": int(keep.sum()),
+                        "total": int(len(widths_geom_final)),
+                    })
+
+    med_g, iqr_g = robust_agg(widths_geom_for_agg)
     med_d, iqr_d = robust_agg(widths_depth)
 
     if iqr_g is not None and np.isfinite(iqr_g) and abs(iqr_g) < 1e-3:
@@ -710,7 +793,8 @@ def compute_width(
     #    return WidthResult(0.0, 0.0, 0)
 
     # flags de confiabilidade (agora com par_frac definido)
-    depth_reliable = (not np.isnan(med_d)) and (len(widths_depth) >= min_rows_eff) and (par_frac >= 0.6)
+    depth_reliable_base = (not np.isnan(med_d)) and (len(widths_depth) >= max(3, int(0.5 * min_rows_eff)))
+    depth_reliable = depth_reliable_base and (par_frac >= 0.6)
     geom_reliable  = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_rows_eff)
 
     _swai_log("parallax", {
@@ -738,7 +822,7 @@ def compute_width(
             "div": float(div),
             "divergence_pct": float(divergence_pct)
         })
-        chosen = "depth" if div <= divergence_pct else "geom"
+        chosen = "depth"
     elif depth_reliable:
         chosen = "depth"
     else:
@@ -746,9 +830,33 @@ def compute_width(
 
     _swai_log("chosen", {"chosen": chosen})
     if chosen == "depth":
-        width, iqr, nrows = med_d, iqr_d, len(widths_depth)
+        width, iqr, nrows = float(med_d), iqr_d, len(widths_depth)
+        if geom_reliable and np.isfinite(med_g):
+            G = float(med_g)
+            # Piso mais agressivo quando a própria geometria é baixa (casos diagonais),
+            # mais conservador quando med_g é grande (quase perpendicular, pode estar inflada).
+            if G < 1.8:
+                geom_floor_frac = 0.90
+            elif G < 2.4:
+                geom_floor_frac = 0.80
+            else:
+                geom_floor_frac = 0.70
+
+            geom_floor = geom_floor_frac * G
+            if width < geom_floor:
+                _swai_log("depth_geom_floor", {
+                    "med_d": float(med_d),
+                    "med_g": float(med_g),
+                    "width_before": width,
+                    "geom_floor": geom_floor,
+                    "frac": geom_floor_frac,
+                })
+                width = geom_floor
+                if iqr_g is not None and np.isfinite(iqr_g):
+                    base_iqr = iqr if (iqr is not None and np.isfinite(iqr)) else 0.0
+                    iqr = max(base_iqr, float(iqr_g))
     else:
-        width, iqr, nrows = med_g, iqr_g, len(widths_geom_final)
+        width, iqr, nrows = float(med_g), iqr_g, len(widths_geom_final)
 
     if not np.isfinite(width) or width <= 0:
         return WidthResult(0.0, 0.0, 0)
@@ -789,6 +897,7 @@ def compute_clearances(
     
     results = []
     base_candidate_masks = []
+    H, W = sidewalk.shape
 
     for label, omask in obstacles:
         omask_bool = omask.astype(bool)
@@ -825,31 +934,63 @@ def compute_clearances(
         xR, yR = R_pixel_img
         
         # Calculate sidewalk edges at obstacle's y-position
-        top_x = (yL - top_mask[1]) / top_mask[0] if abs(top_mask[0]) > 1e-5 else 0
-        bot_x = (yL - bot_mask[1]) / bot_mask[0] if abs(bot_mask[0]) > 1e-5 else 0
-        left_curb = min(top_x, bot_x)
-        right_curb = max(top_x, bot_x)
-        
+        if abs(top_mask[0]) > 1e-5:
+            top_x = (yL - top_mask[1]) / top_mask[0]
+        else:
+            top_x = float("nan")
+        if abs(bot_mask[0]) > 1e-5:
+            bot_x = (yL - bot_mask[1]) / bot_mask[0]
+        else:
+            bot_x = float("nan")
+
+        curb_candidates = [v for v in (top_x, bot_x) if np.isfinite(v)]
+        if len(curb_candidates) < 2:
+            # Curbs not well-defined at this row; fall back to conservative zeros.
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, L_pixel_img, R_pixel_img))
+            continue
+
+        left_curb = float(min(curb_candidates))
+        right_curb = float(max(curb_candidates))
+
+        # Clamp curb positions to image bounds to avoid wild extrapolation.
+        left_curb = max(0.0, min(left_curb, float(W - 1)))
+        right_curb = max(0.0, min(right_curb, float(W - 1)))
+
         # Calculate widths in pixels
         total_width = right_curb - left_curb
-        left_clearance = xL - left_curb
-        right_clearance = right_curb - xR
-        
-        # Convert to percentages
-        if total_width > 1:
-            left_percent = (left_clearance / total_width)
-            right_percent = (right_clearance / total_width)
-        else:
-            left_percent, right_percent = 0.0, 0.0
+        if not np.isfinite(total_width) or total_width <= 1.0:
+            results.append(ClearanceResult(label, 0.0, 0.0, 0.0, None, L_pixel_img, R_pixel_img))
+            continue
+
+        # Clamp obstacle base to lie within the curb interval. This prevents
+        # negative clearances or values larger than the sidewalk width when
+        # segmentation/refinement slightly overshoots the curb.
+        xL_clamped = min(max(float(xL), left_curb), right_curb)
+        xR_clamped = min(max(float(xR), left_curb), right_curb)
+
+        left_clearance = xL_clamped - left_curb
+        right_clearance = right_curb - xR_clamped
+
+        # Convert to percentages (now guaranteed within [0, 1] up to numerics)
+        left_percent = max(0.0, min(left_clearance / total_width, 1.0))
+        right_percent = max(0.0, min(right_clearance / total_width, 1.0))
 
         # print(f"L: {left_percent * 100:.2f} % R: {right_percent * 100:.2f} % ")
 
+        L_m = left_percent * sidewalk_width_m
+        R_m = right_percent * sidewalk_width_m
+        # Numerical safety: ensure we never exceed the sidewalk width and
+        # keep obstacle width non-negative.
+        L_m = max(0.0, min(L_m, sidewalk_width_m))
+        R_m = max(0.0, min(R_m, sidewalk_width_m))
+        obs_w = max(0.0, sidewalk_width_m - (L_m + R_m))
+
         results.append(ClearanceResult(
             label=label,
-            L_m=left_percent*sidewalk_width_m,
-            R_m=right_percent*sidewalk_width_m,
-            total_m=left_percent*sidewalk_width_m + right_percent*sidewalk_width_m,
-            obs_width=sidewalk_width_m - (left_percent + right_percent) * sidewalk_width_m,
+            L_m=L_m,
+            R_m=R_m,
+            total_m=L_m + R_m,
+            obs_width=obs_w,
             L_pixel=L_pixel_img,
             R_pixel=R_pixel_img
         ))

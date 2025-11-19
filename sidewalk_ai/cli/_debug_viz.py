@@ -87,6 +87,18 @@ def overlay_mask(img, mask, color=(0,255,0), alpha=0.4):
     ovl[mask] = color
     return cv2.addWeighted(ovl, alpha, img, 1-alpha, 0)
 
+def _fmt_num(x, default="N/A", precision=2):
+    """Format a numeric value safely: return `default` when x is None or non-finite."""
+    try:
+        if x is None:
+            return default
+        xv = float(x)
+        if not np.isfinite(xv):
+            return default
+        return f"{xv:.{precision}f}"
+    except Exception:
+        return default
+
 def get_depth_model_name(depth_estimator):
     """Get the correct depth model name for display"""
     if hasattr(depth_estimator, '__class__'):
@@ -424,10 +436,28 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                             "Sidewalk (refined mask only)"))
 
     # 3 depth - com legenda de escala (sem cabeçalho interno na legenda)
-    depth = pipeline.depth_est.predict(img_rgb)
-    dmin, dmax = float(depth.min()), float(depth.max())
-    vis = ((depth - dmin) / (max(dmax - dmin, 1e-6)) * 255).astype(np.uint8)
+    if hasattr(pipeline, "_predict_depth_without_logo"):
+        depth = pipeline._predict_depth_without_logo(img_rgb)
+    else:
+        depth = pipeline.depth_est.predict(img_rgb)
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    if valid.any():
+        dmin = float(np.nanmin(depth))
+        dmax = float(np.nanmax(depth))
+        rng = max(dmax - dmin, 1e-6)
+        norm = (depth - dmin) / rng
+        norm[~valid] = 0.0  # pixels sem profundidade real (logo)
+    else:
+        dmin, dmax = 0.0, 1.0
+        norm = np.zeros_like(depth, dtype=np.float32)
+
+    vis = (norm * 255).astype(np.uint8)
     depth_color = cv2.applyColorMap(vis, cv2.COLORMAP_INFERNO)
+    if not valid.all():
+        # pinta regi��es sem dado (logo) de branco para ficar evidente
+        depth_color = depth_color.copy()
+        depth_color[~valid] = (255, 255, 255)
 
     depth_model_name = get_depth_model_name(pipeline.depth_est)
     unit_label = "m" if getattr(pipeline.depth_est, "is_metric", False) else "rel."
@@ -466,10 +496,19 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- FOOTER ------------------------------------------------
     ftr_h = 30
     footer = np.full((ftr_h, grid.shape[1], 3), 30, np.uint8)
-    clear  = ", ".join(f"{c.label}:{c.obs_width:.2f}m" for c in res.clearances) \
-             if res.clearances else "no obstacles"
-    txt2 = f"width = {res.width.width_m:.2f} +/- {res.width.margin_m:.2f} m   " \
-           f"|   clearance: {clear}"
+    # safely format obstacle widths and overall width/margin (they may be None or NaN)
+    clear = "no obstacles"
+    if res.clearances:
+        parts = []
+        for c in res.clearances:
+            obs_w = getattr(c, 'obs_width', None)
+            parts.append(f"{c.label}:{_fmt_num(obs_w)}m")
+        clear = ", ".join(parts) if parts else "no obstacles"
+
+    w_obj = getattr(res, 'width', None)
+    w_m = getattr(w_obj, 'width_m', None) if w_obj is not None else None
+    w_margin = getattr(w_obj, 'margin_m', None) if w_obj is not None else None
+    txt2 = f"width = {_fmt_num(w_m)} +/- {_fmt_num(w_margin)} m   |   clearance: {clear}"
     cv2.putText(footer, txt2, (10, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
 

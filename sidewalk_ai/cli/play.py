@@ -148,13 +148,19 @@ def _print_result(obj):
     # Print width and clearances
     print(f"WIDTH  {chosen.width.width_m:.2f} ± {chosen.width.margin_m:.2f} m")
     for c in chosen.clearances:
-        print(f"CLEAR  {c.label:<8} {c.obs_width:.2f} m  L={c.L_m:.2f}  R={c.R_m:.2f}")
+        val = c.obs_width if c.obs_width is not None else float("nan")
+        L = getattr(c, "L_m", None)
+        R = getattr(c, "R_m", None)
+        if L is not None and R is not None:
+            print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
+        else:
+            print(f"CLEAR  {c.label:<8} {val:.2f} m")
 
     # ── Accessibility (single-view) ───────────────────────────────────
     try:
         thr = float(getattr(args, "min_clear", 1.20))
-        # o mesmo fator usado no accessibility.py (padrão 0.75)
-        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+        # o mesmo fator usado no accessibility.py (padrão 0.50)
+        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
         mid_thr = mid_ratio * thr
         acc = compute_single_view_metrics(chosen.clearances, min_clear_required_m=thr)
         g = acc.global_stats
@@ -204,6 +210,8 @@ def _print_tuple_results(obj):
                 val = c.obs_width 
                 L = getattr(c, 'L_m', None)
                 R = getattr(c, 'R_m', None)
+                if val is None:
+                    val = float("nan")
                 if L is not None and R is not None:
                     print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
                 else:
@@ -228,8 +236,9 @@ def _print_tuple_results(obj):
         if agg:
             print(f"\n{side_name} AGGREGATED CLEARANCES:")
             for label, vals in agg.items():
-                mean_v = float(np.mean(vals))
-                med_v = float(np.median(vals))
+                vals_num = [v for v in vals if v is not None and np.isfinite(v)]
+                mean_v = float(np.mean(vals_num)) if vals_num else float("nan")
+                med_v = float(np.median(vals_num)) if vals_num else float("nan")
                 cnt = len(vals)
                 print(f"  {label:<12} count={cnt:2d}  mean={mean_v:.2f} m  median={med_v:.2f} m")
         else:
@@ -243,7 +252,7 @@ def _print_tuple_results(obj):
     try:
        thr = float(getattr(args, "min_clear", 1.20))
        import os
-       mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+       mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
        mid_thr = mid_ratio * thr
 
        acc = compute_multiview_metrics(left, right, min_clear_required_m=thr)
