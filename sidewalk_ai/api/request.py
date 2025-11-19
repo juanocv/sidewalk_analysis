@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import time
 from typing import Optional
 
 import os
@@ -43,10 +44,10 @@ def from_cli_args(args) -> RequestConfig:
         return_mask=getattr(args, "return_mask", False),
     )
 
-
-def from_api_req(req) -> RequestConfig:
+def from_api_single(req) -> RequestConfig:
+    """Normaliza um request *single-view* para o run_pipeline."""
     return RequestConfig(
-        multi_view=bool(getattr(req, "multi_view", True)),
+        multi_view=False,
         address=getattr(req, "address", None),
         lat=getattr(req, "lat", None),
         lon=getattr(req, "lon", None),
@@ -61,6 +62,23 @@ def from_api_req(req) -> RequestConfig:
         return_mask=bool(getattr(req, "return_mask", False)),
     )
 
+def from_api_multi(req) -> RequestConfig:
+    """Normaliza um request *multi-view* para o run_pipeline."""
+    return RequestConfig(
+        multi_view=True,
+        address=getattr(req, "address", None),
+        lat=getattr(req, "lat", None),
+        lon=getattr(req, "lon", None),
+        heading=0,  # ignorado em multi-view
+        pitch=int(getattr(req, "pitch", 0) or 0),
+        fov=int(getattr(req, "fov", 90) or 90),
+        depth=getattr(req, "depth", os.getenv("SWAI_DEPTH", "midas")),
+        zoe_variant=getattr(req, "zoe_variant", None),
+        refine=bool(getattr(req, "refine", True)),
+        force_fallback=bool(getattr(req, "force_fallback", False)),
+        fallback_scale=getattr(req, "fallback_scale", None),
+        return_mask=bool(getattr(req, "return_mask", False)),
+    )
 
 def run_pipeline(pipe, cfg: RequestConfig):
     """
@@ -79,9 +97,15 @@ def run_pipeline(pipe, cfg: RequestConfig):
     # Multi-view: prefer address or lat/lon; pipeline handles sampling
     if cfg.multi_view:
         if cfg.lat is not None and cfg.lon is not None:
-            out = pipe.analyse_coords(lat=cfg.lat, lon=cfg.lon, pitch=cfg.pitch, fov=cfg.fov)
+            # novo pipeline: use multi_view=True em analyse_coords
+            out = pipe.analyse_coords(
+                lat=cfg.lat, lon=cfg.lon,
+                pitch=cfg.pitch, fov=cfg.fov,
+                multi_view=True,
+            )
         elif cfg.address:
-            out = pipe.analyse_address(cfg.address)
+            # novo método específico de multi-view por endereço
+            out = pipe.analyse_address_multiview(cfg.address, pitch=cfg.pitch, fov=cfg.fov)
         else:
             raise ValueError("Either address or lat+lon required for multi-view")
 
@@ -91,17 +115,50 @@ def run_pipeline(pipe, cfg: RequestConfig):
         def _median_of_estimates(estimates):
             if not estimates:
                 return None
+            # cole pares, mas só mantenha os que têm width finita e >0
             pairs = [(e.width.width_m, e.width.margin_m) for e in estimates]
-            pairs = [(w, m) for (w, m) in pairs if w is not None and w != 0]
+            pairs = [(w, m) for (w, m) in pairs if w is not None and np.isfinite(w) and w > 0]
             if not pairs:
                 return None
-            widths = [w for (w, m) in pairs]
-            margins = [m for (w, m) in pairs]
-            return float(np.median(widths)), float(np.median(margins))
+            widths  = [w for (w, m) in pairs]  # já estão filtradas
+            margins = [m for (w, m) in pairs if m is not None and np.isfinite(m)]
+            med_w = float(np.median(widths)) if widths else float("nan")
+            med_m = float(np.median(margins)) if margins else float("nan")
+            return med_w, med_m
+
+        def _width_range_of_estimates(estimates):
+            """
+            Retorna uma faixa robusta [lo, hi] de larguras prováveis para um conjunto
+            de estimativas multi-view. Usa percentis 10–90 quando há dados suficientes
+            e min/max nos casos com poucas amostras.
+            """
+            if not estimates:
+                return None
+            widths = [
+                float(e.width.width_m)
+                for e in estimates
+                if getattr(e, "width", None) is not None
+                and getattr(e.width, "width_m", None) is not None
+                and np.isfinite(e.width.width_m)
+                and e.width.width_m > 0
+            ]
+            if not widths:
+                return None
+            x = np.asarray(widths, dtype=float)
+            if x.size >= 4:
+                lo = float(np.percentile(x, 10))
+                hi = float(np.percentile(x, 90))
+            else:
+                lo = float(np.min(x))
+                hi = float(np.max(x))
+            return lo, hi
 
         meta = {
             "left_median": _median_of_estimates(left),
             "right_median": _median_of_estimates(right),
+            "left_width_range": _width_range_of_estimates(left),
+            "right_width_range": _width_range_of_estimates(right),
+            "all_width_range": _width_range_of_estimates((left or []) + (right or [])),
             "n_headings": {"left": len(left), "right": len(right)},
         }
 
@@ -110,15 +167,12 @@ def run_pipeline(pipe, cfg: RequestConfig):
         per_heading = []
         obstacle_images = []
 
-        def _png_b64_from_rgb(rgb_arr: np.ndarray) -> str:
-            bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
-            return base64.b64encode(cv2.imencode('.png', bgr)[1]).decode()
-
         for side_name, lst in (('left', left), ('right', right)):
             for i, est in enumerate(lst):
                 ch = {
                     'side': side_name,
                     'index': i,
+                    'heading_deg': getattr(est, 'heading', None),
                     'width_m': getattr(est.width, 'width_m', None),
                     'margin_m': getattr(est.width, 'margin_m', None),
                     'n_clearances': len(est.clearances) if getattr(est, 'clearances', None) is not None else 0,
@@ -169,12 +223,12 @@ def run_pipeline(pipe, cfg: RequestConfig):
     if cfg.lat is not None and cfg.lon is not None:
         req = ImageRequest(lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path)
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
 
     if cfg.address:
         lat, lon = pipe.sv.geocode(cfg.address)
         req = ImageRequest(lat=lat, lon=lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path)
+        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
 
     raise ValueError("Either address or lat+lon required")

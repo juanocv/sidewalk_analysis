@@ -4,9 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Iterable, Sequence, Literal
+from typing import Iterable, Sequence
 
-from matplotlib import pyplot as plt
 import numpy as np
 
 from sidewalk_ai.processing.refinement import refine_sidewalk_mask
@@ -26,16 +25,23 @@ from sidewalk_ai.models.base import Segmenter
 from sidewalk_ai.models.midas import MidasEstimator
 
 
+_LOGO_BAR_PX = 20  # faixa inferior com a barra/logo do Google
+try:
+    from sidewalk_ai.io.image_io import get_google_bar_height_px as _swai_get_bar_height
+    _LOGO_BAR_PX = int(_swai_get_bar_height())
+except Exception:
+    # fallback silencioso para manter compatibilidade se o helper nǜo existir
+    pass
+
 WIDTH_PARAMS = {
     "band_mode": "adaptive",
     "adaptive_pct": (0.60, 0.95),   # ↓ faixa mais estreita (mais perto do observador)
     "du_range_px": (20, 220),       # ↓ corta near-perpendicular extremo
     "parallax_range": (0.05, 0.45), # ↓ evita “paralaxe exuberante” instável
-    "continuity_min_frac": 0.75,    # ↑ exige componente dominante mais claro
-    "max_gap_cols": 40,             # ↓ menos tolerância a máscaras “partidas”
     "min_valid_rows": 7,            # ↑ mediana mais robusta
     "divergence_pct": 0.25,         # ↓ troca p/ geom mais cedo quando divergir
     "use_data_driven_margin": True,
+    "bottom_ignore_px": _LOGO_BAR_PX,         # ignora a faixa com a logo
 }
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +59,7 @@ class Result:
     img_path: Path | None = None
     rgb_image: np.ndarray | None = None  # H×W×3  uint8 (RGB)
     obstacles: list[tuple[str, np.ndarray]] | None = None
+    heading: int | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -91,175 +98,327 @@ class SidewalkPipeline:
         streetview: StreetViewClient,
         refine: bool = True,
         fuse_method: str | None = None,
+        initial_time: float = None,
     ) -> None:
         self.segmenter = segmenter
         self.depth_est = depth
         self.sv = streetview
         self.refine = refine
         self.fuse_method = fuse_method
+        self.initial_time = initial_time
+
+    # ------------------------------------------------------------------ #
+    # Depth helper                                                       #
+    # ------------------------------------------------------------------ #
+    def _predict_depth_without_logo(self, img_rgb: np.ndarray) -> np.ndarray:
+        """
+        Executa o estimador de profundidade ignorando a faixa inferior
+        com a logo do Google, mas devolvendo um mapa H×W alinhado com
+        a imagem original.
+
+        A segmentação continua enxergando a imagem inteira (incluindo
+        a barra), mas o modelo de profundidade nunca recebe esses pixels.
+        """
+        H, W = img_rgb.shape[:2]
+        bar = _LOGO_BAR_PX
+
+        if bar > 0 and H > bar:
+            core_img = img_rgb[:-bar, :, :]
+        else:
+            core_img = img_rgb
+
+        depth_core = self.depth_est.predict(core_img)
+        depth_core = np.asarray(depth_core, dtype=np.float32)
+
+        # MiDaS/Zoe já devolvem mesma resolução da entrada, mas mantemos
+        # uma checagem defensiva.
+        if depth_core.shape[:2] != core_img.shape[:2]:
+            raise RuntimeError(
+                f"Depth estimator returned shape {depth_core.shape} for input {core_img.shape}"
+            )
+
+        # Sem recorte? Basta devolver o resultado direto.
+        if core_img is img_rgb or bar <= 0 or H <= bar:
+            return depth_core
+
+        # Com recorte: remonta um mapa H�-W, deixando a faixa da logo como NaN.
+        depth_full = np.full((H, W), np.nan, dtype=np.float32)
+        h_core, w_core = depth_core.shape[:2]
+        depth_full[:h_core, :w_core] = depth_core
+        return depth_full
 
     # ------------------------------------------------------------------ #
     # Convenience overloads                                              #
     # ------------------------------------------------------------------ #
-    def analyse_address(self, address: str) -> Result:
+    def analyse_address(
+        self,
+        address: str,
+        *,
+        heading: int | None = None,
+        pitch: int = 0,
+        fov: int = 90,
+        initial_time: float = None,
+    ) -> Result:
         """
-        The call your **web app** or CLI will use 99 % of the time.
+        Single-view por endereço. Se heading não for dado, tenta achar o centro
+        (usando pitch/fov) e usa 0° como fallback.
         """
         lat, lon = self.sv.geocode(address)
-        center_heading = self._find_street_center(lat=lat, lon=lon)
-        left_headings, right_headings = self._generate_heading_ranges(center_heading)
+        if heading is None:
+            center = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+            heading = center if center is not None else 0
 
-        left_estimates = []
-        right_estimates = []
-        for heading in left_headings:
-            req = ImageRequest(lat, lon, heading=heading)
+        req = ImageRequest(lat, lon, heading=int(heading), pitch=pitch, fov=fov)
+        t0 = time.time()
+        img_path = self.sv.fetch(req)
+        return self._analyse_path(
+            img_path,
+            pitch=pitch,
+            fov=fov,
+            heading=int(heading),
+            initial_time=initial_time or time.time(),
+        )
+
+    def analyse_address_multiview(
+        self,
+        address: str,
+        *,
+        pitch: int = 0,
+        fov: int = 90,
+        max_per_side: int = 4,   # limite prático p/ tempo de execução
+    ) -> tuple[list["Result"], list["Result"]]:
+        """
+        Multi-view por endereço: amostra ângulos à esquerda/direita do centro.
+        Usa 0° como fallback se o centro não for encontrado.
+        """
+        lat, lon = self.sv.geocode(address)
+        center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+        if center_heading is None:
+            center_heading = 0  # fallback robusto
+
+        left_headings, right_headings = self._generate_heading_ranges(center_heading, max_per_side=max_per_side)
+
+        left_estimates: list[Result] = []
+        right_estimates: list[Result] = []
+        for h in left_headings:
+            print(f"[MULTI-VIEW] analysing LEFT heading {h}°")
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
+            t0 = time.time()
             img_path = self.sv.fetch(req)
-            left_estimates.append(self._analyse_path(img_path))
+            try:
+                left_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
+            except RefinementError as e:
+                print(f"Skipping heading {h} (left): {e}")
 
-        for heading in right_headings:
-            req = ImageRequest(lat, lon, heading=heading)
+        for h in right_headings:
+            print(f"[MULTI-VIEW] analysing RIGHT heading {h}°")
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
+            t0 = time.time()
             img_path = self.sv.fetch(req)
-            right_estimates.append(self._analyse_path(img_path))
-
-        median_left = self._calculate_median_width(left_estimates)
-        median_right = self._calculate_median_width(right_estimates)
+            try:
+                right_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
+            except RefinementError as e:
+                print(f"Skipping heading {h} (right): {e}")
 
         return left_estimates, right_estimates
 
     def analyse_coords(
         self,
         lat: float, lon: float,
-        heading: int = 0,
-        pitch:   int = 0,               
-        fov:     int = 90,              
-    ) -> Result:
+        heading: int | None = None,
+        pitch:   int = 0,
+        fov:     int = 90,
+        *,
+        multi_view: bool = False,
+        max_per_side: int = 4,  # novo knob
+    ) -> Result | tuple[list["Result"], list["Result"]]:
+        if not multi_view:
+            use_heading = heading
+            if use_heading is None:
+                center = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
+                use_heading = center if center is not None else 0
+            req = ImageRequest(lat, lon, heading=int(use_heading), pitch=pitch, fov=fov)
+            t0 = time.time()
+            img_path = self.sv.fetch(req)
+            return self._analyse_path(
+                img_path,
+                pitch=pitch,
+                fov=fov,
+                heading=int(use_heading),
+                initial_time=time.time(),
+            )
+
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
-        left_headings, right_headings = self._generate_heading_ranges(center_heading)
+        if center_heading is None:
+            center_heading = heading if heading is not None else 0  # fallback
 
-        left_estimates = []
-        right_estimates = []
-        for heading in left_headings:
-            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+        left_headings, right_headings = self._generate_heading_ranges(center_heading, max_per_side=max_per_side)
+
+        left_estimates: list[Result] = []
+        right_estimates: list[Result] = []
+        for h in left_headings:
+            print(f"[MULTI-VIEW] analysing LEFT heading {h}°")
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                left_estimates.append(self._analyse_path(img_path))
+                left_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
-                print(f"Skipping heading {heading} (left): {e}")
-                continue
+                print(f"Skipping heading {h} (left): {e}")
 
-        for heading in right_headings:
-            req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+        for h in right_headings:
+            print(f"[MULTI-VIEW] analysing RIGHT heading {h}°")
+            req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             img_path = self.sv.fetch(req)
             try:
-                right_estimates.append(self._analyse_path(img_path))
+                right_estimates.append(
+                    self._analyse_path(
+                        img_path,
+                        pitch=pitch,
+                        fov=fov,
+                        heading=h,
+                        initial_time=time.time(),
+                    )
+                )
             except RefinementError as e:
-                print(f"Skipping heading {heading} (right): {e}")
-                continue
-
-        median_left = self._calculate_median_width(left_estimates)
-        median_right = self._calculate_median_width(right_estimates)
+                print(f"Skipping heading {h} (right): {e}")
 
         return left_estimates, right_estimates
     
-    def _calculate_median_width(
-        self,
-        estimates: Sequence[Result],
-    ) -> Result:
-        pass  # TODO: implement median width calculation from multiple estimates
-
+    # ------------------------------------------------------------------ #
+    # Core implementation (private)                                      #
     def _find_street_center(
         self,
-        lat: float | None = None,
-        lon: float | None = None,
-        address: str | None = None,
+        lat: float,
+        lon: float,
+        *,
         pitch: int = 0,
         fov: int = 90,
+        initial_time: float = None,
         test_angles: list[int] | None = None,
     ) -> int | None:
         """
-        Find the heading that shows the street center (two sidewalks visible).
-        
-        Parameters
-        ----------
-        lat, lon : float
-            Location coordinates
-        pitch, fov : int
-            Camera parameters
-        test_angles : list[int], optional
-            Headings to test. Defaults to [0, 90, 180, 270]
-        
-        Returns
-        -------
-        int or None
-            Best heading showing street center, or None if not found
+        Busca um heading que mostre o centro da rua (duas guias visíveis).
+        Retorna None se não achar em `test_angles`.
         """
+        
         if test_angles is None:
             test_angles = [0, 90, 180, 270]
-        
+
+        if initial_time is None:
+            # Prefer pipeline-wide start time when available; otherwise start now.
+            initial_time = self.initial_time or time.time()
+
         print(f"Testing {len(test_angles)} angles to find street center")
-        
+
         best_heading = None
-        best_score = -1
-        
+        best_score = -1.0
+
         for heading in test_angles:
             try:
-                # Fetch image for this heading
-                if address is None:
-                    req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
-                    img_path = self.sv.fetch(req)
-                    img_rgb = read_rgb(img_path)
-                elif lat is None or lon is None:
-                    img_path = self.sv.fetch(address)
-                    img_rgb = read_rgb(img_path)
+                req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
+                # t0 = time.time()
+                img_path = self.sv.fetch(req)
+                img_rgb = read_rgb(img_path)
 
-                # Quick segmentation (just need the mask)
                 out = self.segmenter.segment(img_rgb)
                 sidewalk_mask = out[0]
-                
-                # Handle ensemble outputs
                 if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
                     sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
-                
-                # Check if we have two curbs (street center indicator)
+
+                sidewalk_mask = sidewalk_mask.astype(bool)
+
+                # Pré-processamento leve: fechar grandes oclusões (carros, arbustos)
+                # usando o mesmo tipo de bridge-fill da etapa de refinamento.
+                '''
+                try:
+                    bridged = bridge_fill_between_edges(
+                        sidewalk_mask.astype(np.uint8),
+                        smooth_kernel=5,
+                        min_valid_cols=5,
+                        clamp_to=sidewalk_mask.shape[0] - 30,
+                    ).astype(bool)
+                    mask_for_center = bridged
+                except Exception as bf_exc:
+                    print(f"Heading {heading}°: bridge-fill failed ({bf_exc}), using raw mask")
+                    mask_for_center = sidewalk_mask
+                '''
+
                 has_two = _has_two_curbs(sidewalk_mask, min_gap_px=50)
-                
-                # Score this heading
                 if has_two:
-                    # Additional scoring: prefer more balanced sidewalk coverage
+                    h, w = sidewalk_mask.shape
                     cols = np.where(sidewalk_mask)[1]
                     if cols.size > 0:
-                        left_coverage = np.sum(cols < sidewalk_mask.shape[1] // 2)
-                        right_coverage = np.sum(cols >= sidewalk_mask.shape[1] // 2)
-                        balance = min(left_coverage, right_coverage) / max(left_coverage, right_coverage, 1)
-                        score = balance
+                        # 1) equilíbrio esquerda/direita em área de calçada
+                        left_cov  = np.sum(cols <  w // 2)
+                        right_cov = np.sum(cols >= w // 2)
+                        balance = min(left_cov, right_cov) / max(left_cov, right_cov, 1)
+
+                        # 2) continuidade vertical em ambas as calçadas
+                        y0 = int(0.30 * h)
+                        y1 = int(0.90 * h)
+                        if y1 <= y0:
+                            y0, y1 = 0, h
+                        band_h = max(1, y1 - y0)
+                        left_rows  = np.any(sidewalk_mask[y0:y1, : w // 2], axis=1)
+                        right_rows = np.any(sidewalk_mask[y0:y1, w // 2:], axis=1)
+                        frac_left_rows  = float(left_rows.sum()) / band_h
+                        frac_right_rows = float(right_rows.sum()) / band_h
+                        row_score = min(frac_left_rows, frac_right_rows)
+
+                        # score final combina equilíbrio e continuidade
+                        score = balance * row_score
                     else:
-                        score = 0.5
-                    
+                        score = 0.0
+
                     print(f"Heading {heading}°: Center found (score={score:.2f})")
-                    
                     if score > best_score:
                         best_score = score
                         best_heading = heading
                 else:
                     print(f"Heading {heading}°: No center detected")
-                    
             except Exception as e:
                 print(f"Heading {heading}°: Error - {e}")
                 continue
-        
+
         if best_heading is not None:
             print(f"Best center heading: {best_heading}° (score={best_score:.2f})")
         else:
             print("No street center found in test angles")
-        
+
+        print(f"Finding street center took {time.time() - initial_time:.4f} seconds")
         return best_heading
 
     def _generate_heading_ranges(
         self,
         center_heading: int,
-        initial_offset: int = 40,
-        angle_step: int = 15,
-        max_deviation: int = 90,
+        initial_offset: int = 70,
+        angle_step: int = 5,
+        max_deviation: int = 120,
+        max_per_side: int | None = None,
     ) -> tuple[list[int], list[int]]:
         """
         Generate heading ranges for left and right sides from center.
@@ -278,14 +437,28 @@ class SidewalkPipeline:
         left_headings, right_headings : tuple[list[int], list[int]]
             Lists of headings for left and right sides
         """
-        # Start at an initial offset (e.g., 40°) then step by angle_step up to
-        # max_deviation. This avoids sampling headings that are too near the
-        # street-center view which may still show both curbs and add noise.
+        # Gera offsets começando mais perto de `max_deviation` (perpendicular)
+        # e voltando em passos de `angle_step` até `initial_offset`. Assim,
+        # quando limitamos via `max_per_side`, priorizamos sempre os ângulos
+        # mais próximos de 90° (perpendicular e quase-perpendicular).
         def seq_offsets(sign: int) -> list[int]:
+            """Produce offsets starting at `initial_offset` and increasing by
+            `angle_step` up to `max_deviation`.
+
+            This yields offsets in the order: initial_offset,
+            initial_offset+angle_step, initial_offset+2*angle_step, ...
+            which matches the desired capture sequence (closest to
+            perpendicular first is controlled by initial_offset).
+            """
             offsets = []
+            # defensive: ensure sensible parameters
+            if angle_step <= 0 or max_deviation < initial_offset:
+                return offsets
             angle = initial_offset
             while angle <= max_deviation:
                 offsets.append(sign * angle)
+                if max_per_side is not None and len(offsets) >= max_per_side:
+                    break
                 angle += angle_step
             return offsets
 
@@ -301,10 +474,21 @@ class SidewalkPipeline:
     # ------------------------------------------------------------------ #
     # Core implementation (private)                                      #
     # ------------------------------------------------------------------ #
-    def _analyse_path(self, img_path: Path) -> Result:
+    def _analyse_path(
+        self,
+        img_path: Path,
+        *,
+        pitch: int = 0,
+        fov: int = 90,
+        heading: int | None = None,
+        initial_time: float = None,
+    ) -> Result:
+        if initial_time is None:
+            initial_time = self.initial_time
+        if initial_time is None:
+            initial_time = time.time()
         img_rgb = read_rgb(img_path)
 
-        #initial_time = time.time()
         # -------- Mask Segmentation -------- #
         obstacles = []
         out = self.segmenter.segment(img_rgb)
@@ -320,11 +504,11 @@ class SidewalkPipeline:
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
-        #print(f"Segmentation took {time.time() - initial_time:.4f} seconds")
+        print(f"Segmentation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Mask Refinement -------- #
         refined_mask, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_mask)
-        #print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
+        print(f"Mask refinement took {time.time() - initial_time:.4f} seconds")
 
         # -------- Obstacle Extraction (base-only) -------- #
         # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
@@ -332,80 +516,44 @@ class SidewalkPipeline:
         if seg_map is not None and seg_info is not None:
             obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
         # caso extremo: sem panoptic disponível, mantém os do segmenter
-        #print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
+        print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
 
         # -------- Depth ------------------------------------------------ #
-        depth_map = self.depth_est.predict(img_rgb)
-        
-        #metric = getattr(self.depth_est, "is_metric", False)
-        #m_cov = float(sidewalk_mask.mean())
-        #d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
-        
+        depth_map = self._predict_depth_without_logo(img_rgb)
+
+        metric = getattr(self.depth_est, "is_metric", False)
+        m_cov = float(sidewalk_mask.mean())
+        valid_depth = np.isfinite(depth_map)
+        if valid_depth.any():
+            d_min = float(np.nanmin(depth_map))
+            d_med = float(np.nanmedian(depth_map))
+            d_max = float(np.nanmax(depth_map))
+        else:
+            d_min = d_med = d_max = float("nan")
+
         #print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
         #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
         #                    "depth_metric": bool(metric)})
 
-        '''
-        # --- optional runtime overrides via environment variables ---
-        import os
-        def _tuple_from_env(key, cast=float):
-            val = os.getenv(key, None)
-            if not val:
-                return None
-            try:
-                a, b = val.split(",")
-                return (cast(a.strip()), cast(b.strip()))
-            except Exception:
-                return None
-
-        kw = {}
-        band_mode = os.getenv("SWAI_BAND_MODE", None)
-        if band_mode in ("adaptive","fixed"):
-            kw["band_mode"] = band_mode
-
-        t = _tuple_from_env("SWAI_DU_RANGE", int)
-        if t: kw["du_range_px"] = t
-
-        t = _tuple_from_env("SWAI_PARALLAX_RANGE", float)
-        if t: kw["parallax_range"] = t
-
-        v = os.getenv("SWAI_CONTINUITY_MIN_FRAC", None)
-        if v is not None:
-            try: kw["continuity_min_frac"] = float(v)
-            except: pass
-
-        v = os.getenv("SWAI_MAX_GAP_COLS", None)
-        if v is not None:
-            try: kw["max_gap_cols"] = int(v)
-            except: pass
-
-        v = os.getenv("SWAI_MIN_VALID_ROWS", None)
-        if v is not None:
-            try: kw["min_valid_rows"] = int(v)
-            except: pass
-
-        v = os.getenv("SWAI_DIVERGENCE_PCT", None)
-        if v is not None:
-            try: kw["divergence_pct"] = float(v)
-            except: pass
-
-        v = os.getenv("SWAI_USE_DATA_DRIVEN_MARGIN", None)
-        if v is not None:
-            kw["use_data_driven_margin"] = v.strip() not in ("0","false","False")
-
-        '''
-
         # -------- Width ------------------------------------------------ #
         params = dict(WIDTH_PARAMS)
         #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
-        width_res = compute_width(sidewalk_mask, depth_map, **params)
-       
+        width_res = compute_width(sidewalk_mask, depth_map, pitch_deg=pitch, fov_deg=fov, **params)
+
+        # Aviso quando não há suporte suficiente de pixels para medir largura.
+        #if width_res.width_m <= 0.0 and m_cov < 0.05:
+            #print("[SWAI][warning]", {
+            #    "reason": "no_sidewalk_support",
+            #    "mask_coverage": m_cov,
+            #    "width_n_pixels": int(width_res.n_pixels),
+            #})
+
         #print(f"Width estimation {width_res}")
         #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)
-        print([lbl for lbl, _ in obstacles])
+        # print([lbl for lbl, _ in obstacles])
         clearances = compute_clearances(
             sidewalk_mask,
             obstacles=obstacles,            
@@ -415,7 +563,7 @@ class SidewalkPipeline:
             return_candidates=False,
         )
 
-        #print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
+        print(f"Clearance estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Return Result --------------------------------------- #
         self._last_rgb = img_rgb  # for debugging
@@ -429,5 +577,6 @@ class SidewalkPipeline:
             seg_info=seg_info,
             img_path=img_path,
             rgb_image=img_rgb,
-            obstacles=obstacles
+            obstacles=obstacles,
+            heading=heading,
         )

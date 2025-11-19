@@ -13,21 +13,26 @@ Examples
                                     --label sidewalk,pavement,path
 """
 
+from flask import json
 import sidewalk_ai as sw
 from sidewalk_ai.cli._builder import build_segmenter
 from sidewalk_ai.cli._debug_viz import write_debug_sheet
-from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.cli._argparse import build_parser
 from sidewalk_ai.models.factory import build_depth 
 import numpy as np
+import time
 from pathlib import Path
 from sidewalk_ai.api.request import from_cli_args, run_pipeline
-import base64
+from sidewalk_ai.processing.accessibility import (
+   compute_single_view_metrics,
+   compute_multiview_metrics,
+)
 
-
+initial_time = time.time()
 # ───────────────────────── CLI args ────────────────────────────────
 args = build_parser().parse_args()
 args.outdir.mkdir(exist_ok=True, parents=True)
+print(f"CLI argument parsing took {time.time() - initial_time:.4f} seconds")
 
 # ──────────────────────── Debug output ─────────────────────────────
 def log(msg: str):
@@ -50,6 +55,7 @@ streetview = sw.StreetViewClient()
 pipe       = sw.SidewalkPipeline(segmenter=segmenter,
                                  depth=depth,
                                  streetview=streetview)
+print(f"Pipeline building took {time.time() - initial_time:.4f} seconds")
 
 # ── run ────────────────────────────────────────────────────────────
 if args.image:
@@ -95,6 +101,9 @@ if multi_view_meta is not None:
         else:
             print(f"  RIGHT no median (headings={counts.get('right',0)})")
 
+print(f"Pipeline run took {time.time() - initial_time:.4f} seconds")
+
+'''
     if args.debug:
         imgs = multi_view_meta.get('obstacle_images', []) or []
         perh = multi_view_meta.get('per_heading', []) or []
@@ -111,7 +120,7 @@ if multi_view_meta is not None:
                 print(f"WROTE DEBUG {fname}")
             except Exception as e:
                 print(f"Failed to write obstacle image #{i}: {e}")
-
+'''
 # ──────────────────────────── Print results ─────────────────────────
 # `analyse_coords` and `analyse_address` may return tuples of lists
 # (left_estimates, right_estimates). Normalize to a single printable
@@ -139,24 +148,43 @@ def _print_result(obj):
     # Print width and clearances
     print(f"WIDTH  {chosen.width.width_m:.2f} ± {chosen.width.margin_m:.2f} m")
     for c in chosen.clearances:
-        print(f"CLEAR  {c.label:<8} {c.obs_width:.2f} m  L={c.L_m:.2f}  R={c.R_m:.2f}")
+        val = c.obs_width if c.obs_width is not None else float("nan")
+        L = getattr(c, "L_m", None)
+        R = getattr(c, "R_m", None)
+        if L is not None and R is not None:
+            print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
+        else:
+            print(f"CLEAR  {c.label:<8} {val:.2f} m")
 
-
-def _median_of_estimates(estimates):
-    """Return a lightweight median summary (width_m, margin_m) from a list of Result."""
-    if not estimates:
-        return None
-    # build (width, margin) pairs and remove zero/None widths
-    pairs = [(e.width.width_m, e.width.margin_m) for e in estimates]
-    pairs = [(w, m) for (w, m) in pairs if w is not None and w != 0]
-    if not pairs:
-        return None
-    widths = [w for (w, m) in pairs]
-    margins = [m for (w, m) in pairs]
-    med_w = float(np.median(widths))
-    med_m = float(np.median(margins))
-    return med_w, med_m
-
+    # ── Accessibility (single-view) ───────────────────────────────────
+    try:
+        thr = float(getattr(args, "min_clear", 1.20))
+        # o mesmo fator usado no accessibility.py (padrão 0.50)
+        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
+        mid_thr = mid_ratio * thr
+        acc = compute_single_view_metrics(chosen.clearances, min_clear_required_m=thr)
+        g = acc.global_stats
+        med = g.free_total_m.get('median', float('nan'))
+        print(f"  Obstacles={g.total_obstacles} | "
+              f"Median corridor={med:.2f} m | "
+              f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
+        # opcional: ainda pode mostrar a fração ≥ threshold, mas sem sugerir que afeta o ranking
+        # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
+        if acc.per_type:
+            print("  Per-type corridor medians (m):")
+            for t, m in acc.per_type.items():
+                lm = m.free_left_m.get('median', float('nan'))
+                rm = m.free_right_m.get('median', float('nan'))
+                #tm = m.free_total_m.get('median', float('nan'))
+                print(f"    - {t}: left={lm:.2f}  right={rm:.2f}")
+        # optional JSON
+        if getattr(args, "metrics_json", None):
+            out = {"min_clear_required_m": acc.min_clear_required_m,
+                   "global": g.__dict__,
+                   "per_type": {k: v.__dict__ for k, v in acc.per_type.items()}}
+            Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[WARN] failed to compute accessibility metrics for single-view: {e}")
 
 def _print_tuple_results(obj):
     """Print median for each side and all clearances per heading.
@@ -164,17 +192,40 @@ def _print_tuple_results(obj):
     obj is (left_list, right_list)
     """
     left, right = obj
-    lef_med = _median_of_estimates(left)
-    rig_med = _median_of_estimates(right)
+    #lef_med = _median_of_estimates(left)
+    #rig_med = _median_of_estimates(right)
 
-    if lef_med:
-        print(f"LEFT MEDIAN WIDTH  {lef_med[0]:.2f} ± {lef_med[1]:.2f} m")
-    else:
-        print("LEFT MEDIAN WIDTH  no estimates")
-    if rig_med:
-        print(f"RIGHT MEDIAN WIDTH {rig_med[0]:.2f} ± {rig_med[1]:.2f} m")
-    else:
-        print("RIGHT MEDIAN WIDTH no estimates")
+    # Estimated sidewalk width range (multi-view)
+    def _width_range(estimates):
+        vals = [
+            getattr(e.width, "width_m", None)
+            for e in estimates
+            if getattr(e, "width", None) is not None
+            and getattr(e.width, "width_m", None) is not None
+            and np.isfinite(e.width.width_m)
+            and e.width.width_m > 0
+        ]
+        if not vals:
+            return None
+        x = np.asarray(vals, dtype=float)
+        if x.size >= 4:
+            lo = float(np.percentile(x, 10))
+            hi = float(np.percentile(x, 90))
+        else:
+            lo = float(np.min(x))
+            hi = float(np.max(x))
+        return lo, hi
+
+    left_range = _width_range(left)
+    right_range = _width_range(right)
+    all_range = _width_range(list(left) + list(right))
+    print("\nESTIMATED SIDEWALK WIDTH RANGE (multi-view):")
+    if left_range:
+        print(f"  LEFT  ≈ {left_range[0]:.2f} to {left_range[1]:.2f} m")
+    if right_range:
+        print(f"  RIGHT ≈ {right_range[0]:.2f} to {right_range[1]:.2f} m")
+    if all_range:
+        print(f"  ALL   ≈ {all_range[0]:.2f} to {all_range[1]:.2f} m")
 
     # Print per-heading clearances and optionally write debug sheets
     def _print_and_debug_list(lst, side_name):
@@ -183,12 +234,16 @@ def _print_tuple_results(obj):
 
         agg = defaultdict(list)  # label -> list of obs_widths
         for i, res in enumerate(lst):
-            print(f"\n{side_name} heading #{i}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
+            heading_deg = getattr(res, "heading", None)
+            heading_str = f" ({heading_deg}°)" if heading_deg is not None else ""
+            print(f"\n{side_name} heading #{i}{heading_str}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m")
             for c in res.clearances:
-                agg[c.label].append(c.total_m if hasattr(c, 'total_m') else c.obs_width)
-                val = c.total_m if hasattr(c, 'total_m') else c.obs_width
+                agg[c.label].append(c.obs_width)
+                val = c.obs_width 
                 L = getattr(c, 'L_m', None)
                 R = getattr(c, 'R_m', None)
+                if val is None:
+                    val = float("nan")
                 if L is not None and R is not None:
                     print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
                 else:
@@ -213,8 +268,9 @@ def _print_tuple_results(obj):
         if agg:
             print(f"\n{side_name} AGGREGATED CLEARANCES:")
             for label, vals in agg.items():
-                mean_v = float(np.mean(vals))
-                med_v = float(np.median(vals))
+                vals_num = [v for v in vals if v is not None and np.isfinite(v)]
+                mean_v = float(np.mean(vals_num)) if vals_num else float("nan")
+                med_v = float(np.median(vals_num)) if vals_num else float("nan")
                 cnt = len(vals)
                 print(f"  {label:<12} count={cnt:2d}  mean={mean_v:.2f} m  median={med_v:.2f} m")
         else:
@@ -224,10 +280,43 @@ def _print_tuple_results(obj):
     _print_and_debug_list(right, "RIGHT")
 
 
+   # ── Accessibility (multi-view) ────────────────────────────────────
+    try:
+       thr = float(getattr(args, "min_clear", 1.20))
+       import os
+       mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
+       mid_thr = mid_ratio * thr
+
+       acc = compute_multiview_metrics(left, right, min_clear_required_m=thr)
+       print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
+       for side in ("LEFT", "RIGHT", "ALL"):
+           g = acc[side].global_stats
+           avg = g.avg_obstacles_per_view_rounded or g.avg_obstacles_per_view or g.total_obstacles
+           med = g.free_total_m.get('median', float('nan'))
+           print(f"  {side:<5} → Obstacles≈{avg} (avg/view) | "
+                 f"Median corridor={med:.2f} m | "
+                 f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)")
+           # opcional:
+           # print(f"           Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
+       # optional JSON
+       if getattr(args, "metrics_json", None):
+           def _acc_to_dict(a):
+               return {"min_clear_required_m": a.min_clear_required_m,
+                       "global": a.global_stats.__dict__,
+                       "per_type": {k: v.__dict__ for k, v in a.per_type.items()}}
+           out = {"LEFT":  _acc_to_dict(acc["LEFT"]),
+                   "RIGHT": _acc_to_dict(acc["RIGHT"]),
+                   "ALL":   _acc_to_dict(acc["ALL"])}
+           Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    except Exception as e:
+       print(f"[WARN] failed to compute accessibility metrics for multi-view: {e}")
+
+# Choose printing method based on result type
 if isinstance(res, tuple) and len(res) == 2:
     _print_tuple_results(res)
 else:
     _print_result(res)
+print(f"Result printing took {time.time() - initial_time:.4f} seconds")
     
 # ───────────────────────── Debug sheet ────────────────────────────
 # Always write a debug sheet when --debug is set. For file-based runs the
@@ -259,3 +348,4 @@ if args.debug:
         print(f"Failed to write debug sheet: {e}")
     finally:
         args.image = old_image
+print(f"Debug sheet writing took {time.time() - initial_time:.4f} seconds")

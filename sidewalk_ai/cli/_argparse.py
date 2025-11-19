@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deeplab-model", default="deeplabv3plus_resnet101",
                         help="Model ctor name inside your network.modeling "
                             "(e.g. deeplabv3plus_mobilenetv3_large)")
-    parser.add_argument("--depth", default="midas", choices=["midas", "zoe"])
+    parser.add_argument("--depth", default="zoe", choices=["midas", "zoe"])
     parser.add_argument("--zoe-variant",
                     default="zoed_n",
                     choices=["zoed_n","zoed_k","zoed_nk"],
@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Latitude for coordinate-based analysis")
     parser.add_argument("--lon", type=float, default=None,
                         help="Longitude for coordinate-based analysis")
+    
     # Multi-view vs single-view control (CLI default: multi-view)
     parser.add_argument("--multi-view", dest="multi_view", action="store_true",
                         help="Run multi-angle analysis (default)")
@@ -46,10 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
     # Single-view parameters
     parser.add_argument("--heading", type=int, default=0,
                         help="Heading for single-view mode (0-359)")
-    parser.add_argument("--pitch", type=int, default=0,
+    parser.add_argument("--pitch", type=int, default=-10,
                         help="Pitch for single-view mode (-90 to 90)")
     parser.add_argument("--fov", type=int, default=90,
                         help="Field-of-view for single-view mode (10-120)")
     parser.add_argument("--return-mask", action="store_true",
                         help="Return mask and overlay images for single-view runs")
+
+   # Accessibility metrics knobs
+    parser.add_argument("--min-clear", type=float, default=1.20,
+                        help="Minimum free walking path (meters). "
+                             "ABNT NBR 9050 recomenda ≥ 1.20 m (default 1.20)")
+    parser.add_argument("--metrics-json", type=Path, default=None,
+                        help="If set, write accessibility metrics JSON to this path")
     return parser

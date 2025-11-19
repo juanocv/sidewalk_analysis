@@ -11,6 +11,70 @@ def make_palette():
     rng = np.random.default_rng(0)
     lut = rng.integers(0,255,(256,3),np.uint8); lut[0]=(0,0,255); return lut
 
+def _pad_or_crop_height(img: np.ndarray, target_h: int, pad_color: int | tuple = 255) -> np.ndarray:
+    """
+    Casa a ALTURA sem redimensionar (sem interpolação):
+      - se img é mais baixa: preenche embaixo com branco (ou pad_color)
+      - se img é mais alta: corta o excedente embaixo
+    """
+    h, w = img.shape[:2]
+    if h == target_h:
+        return img
+    if h < target_h:
+        if isinstance(pad_color, int):
+            pad = np.full((target_h - h, w, 3), pad_color, np.uint8)
+        else:
+            # pad_color é (B,G,R)
+            pad = np.tile(np.array(pad_color, np.uint8).reshape(1,1,3), (target_h - h, w, 1))
+        return np.vstack([img, pad])
+    # h > target_h
+    return img[:target_h, :, :]
+
+def _match_height(img: np.ndarray, target_h: int) -> np.ndarray:
+    """Resize preserving width to match target height for safe hstack."""
+    h, w = img.shape[:2]
+    if h == target_h:
+        return img
+    interp = cv2.INTER_AREA if h > target_h else cv2.INTER_LINEAR
+    return cv2.resize(img, (w, target_h), interpolation=interp)
+
+def _make_depth_legend(vmin: float, vmax: float, height: int, *, label: str,
+                       bar_w: int = 20, right_pad: int = 6) -> np.ndarray:
+    """
+    Barra vertical (INFERNO) + coluna de texto, compacta:
+      - barra mais fina (bar_w)
+      - largura de texto calculada exatamente pelo tamanho dos rótulos
+      - sem largura mínima (acaba o espaço em branco)
+    """
+    # gradiente (topo = valores maiores)
+    bar = np.linspace(255, 0, height, dtype=np.uint8).reshape(height, 1)
+    bar = np.repeat(bar, max(12, bar_w), axis=1)  # nunca menos que 12px p/ legibilidade
+    bar_color = cv2.applyColorMap(bar, cv2.COLORMAP_INFERNO)
+
+    # textos e medidas
+    vmax_txt = f"{vmax:.2f} {label}"
+    vmin_txt = f"{vmin:.2f} {label}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fs, th = 0.5, 1
+    (w1, _), _ = cv2.getTextSize(vmax_txt, font, fs, th)
+    (w2, _), _ = cv2.getTextSize(vmin_txt, font, fs, th)
+    text_w = max(w1, w2) + right_pad  # largura exata + folga curta
+
+    # coluna de texto compacta
+    text_col = np.full((height, text_w, 3), 255, np.uint8)
+
+    legend = np.hstack([bar_color, text_col])
+
+    # posições (com folga pequena à esquerda do texto)
+    x_text = bar_color.shape[1] + 4
+    top_y  = 14
+    bot_y  = max(16, height - 8)  # garante que o texto inferior não saia da imagem
+
+    cv2.putText(legend, vmax_txt, (x_text, top_y), font, fs, (0,0,0), th, cv2.LINE_AA)
+    cv2.putText(legend, vmin_txt, (x_text, bot_y), font, fs, (0,0,0), th, cv2.LINE_AA)
+
+    return legend
+
 def add_title(img, text):
     canvas = img.copy()
     cv2.putText(canvas, text, (10, 25),
@@ -22,6 +86,18 @@ def overlay_mask(img, mask, color=(0,255,0), alpha=0.4):
     ovl = img.copy()
     ovl[mask] = color
     return cv2.addWeighted(ovl, alpha, img, 1-alpha, 0)
+
+def _fmt_num(x, default="N/A", precision=2):
+    """Format a numeric value safely: return `default` when x is None or non-finite."""
+    try:
+        if x is None:
+            return default
+        xv = float(x)
+        if not np.isfinite(xv):
+            return default
+        return f"{xv:.{precision}f}"
+    except Exception:
+        return default
 
 def get_depth_model_name(depth_estimator):
     """Get the correct depth model name for display"""
@@ -311,9 +387,9 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                 cv2.putText(overlay, olabel, (cx, cy),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
 
-        if legend.shape[0]<h:
-            legend=np.vstack([legend,np.full((h-legend.shape[0],legend.shape[1],3),255,np.uint8)])
-        tiles.append(add_title(np.hstack([overlay,legend]),"Panoptic overlay"))
+        # normaliza a altura da legenda para combinar com a imagem SEM redimensionar (sem compressão)
+        legend = _pad_or_crop_height(legend, h)  # onde h é a altura do overlay/img_bgr
+        tiles.append(add_title(np.hstack([overlay, legend]), "Panoptic overlay"))
 
     # 2 refined overlay
     # tiles.append(add_title(overlay_mask(img_bgr,res.refined_mask.astype(bool)),"Sidewalk (refined mask)"))
@@ -359,12 +435,40 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                                             cv2.COLOR_GRAY2BGR),
                             "Sidewalk (refined mask only)"))
 
-    # 3 depth - FIX: Use correct depth model name
-    depth = pipeline.depth_est.predict(img_rgb)
-    vis=((depth-depth.min())/(depth.ptp()+1e-6)*255).astype(np.uint8)
+    # 3 depth - com legenda de escala (sem cabeçalho interno na legenda)
+    if hasattr(pipeline, "_predict_depth_without_logo"):
+        depth = pipeline._predict_depth_without_logo(img_rgb)
+    else:
+        depth = pipeline.depth_est.predict(img_rgb)
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    if valid.any():
+        dmin = float(np.nanmin(depth))
+        dmax = float(np.nanmax(depth))
+        rng = max(dmax - dmin, 1e-6)
+        norm = (depth - dmin) / rng
+        norm[~valid] = 0.0  # pixels sem profundidade real (logo)
+    else:
+        dmin, dmax = 0.0, 1.0
+        norm = np.zeros_like(depth, dtype=np.float32)
+
+    vis = (norm * 255).astype(np.uint8)
+    depth_color = cv2.applyColorMap(vis, cv2.COLORMAP_INFERNO)
+    if not valid.all():
+        # pinta regi��es sem dado (logo) de branco para ficar evidente
+        depth_color = depth_color.copy()
+        depth_color[~valid] = (255, 255, 255)
+
     depth_model_name = get_depth_model_name(pipeline.depth_est)
-    tiles.append(add_title(cv2.applyColorMap(vis,cv2.COLORMAP_INFERNO),f"Depth ({depth_model_name})"))
-    
+    unit_label = "m" if getattr(pipeline.depth_est, "is_metric", False) else "rel."
+
+    legend_depth = _make_depth_legend(dmin, dmax, height=depth_color.shape[0], label=unit_label)
+    # garante mesma altura sem escalonar (aqui deve bater, mas deixo defensivo):
+    legend_depth = _pad_or_crop_height(legend_depth, depth_color.shape[0])
+
+    depth_tile = np.hstack([depth_color, legend_depth])
+    tiles.append(add_title(depth_tile, f"Depth ({depth_model_name})"))
+
     # grid + header/footer
     tile_h, tile_w = tiles[0].shape[:2]
     cols = 3
@@ -392,10 +496,19 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- FOOTER ------------------------------------------------
     ftr_h = 30
     footer = np.full((ftr_h, grid.shape[1], 3), 30, np.uint8)
-    clear  = ", ".join(f"{c.label}:{c.total_m:.2f}m" for c in res.clearances) \
-             if res.clearances else "no obstacles"
-    txt2 = f"width = {res.width.width_m:.2f} +/- {res.width.margin_m:.2f} m   " \
-           f"|   clearance: {clear}"
+    # safely format obstacle widths and overall width/margin (they may be None or NaN)
+    clear = "no obstacles"
+    if res.clearances:
+        parts = []
+        for c in res.clearances:
+            obs_w = getattr(c, 'obs_width', None)
+            parts.append(f"{c.label}:{_fmt_num(obs_w)}m")
+        clear = ", ".join(parts) if parts else "no obstacles"
+
+    w_obj = getattr(res, 'width', None)
+    w_m = getattr(w_obj, 'width_m', None) if w_obj is not None else None
+    w_margin = getattr(w_obj, 'margin_m', None) if w_obj is not None else None
+    txt2 = f"width = {_fmt_num(w_m)} +/- {_fmt_num(w_margin)} m   |   clearance: {clear}"
     cv2.putText(footer, txt2, (10, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
 
