@@ -126,9 +126,39 @@ def run_pipeline(pipe, cfg: RequestConfig):
             med_m = float(np.median(margins)) if margins else float("nan")
             return med_w, med_m
 
+        def _width_range_of_estimates(estimates):
+            """
+            Retorna uma faixa robusta [lo, hi] de larguras prováveis para um conjunto
+            de estimativas multi-view. Usa percentis 10–90 quando há dados suficientes
+            e min/max nos casos com poucas amostras.
+            """
+            if not estimates:
+                return None
+            widths = [
+                float(e.width.width_m)
+                for e in estimates
+                if getattr(e, "width", None) is not None
+                and getattr(e.width, "width_m", None) is not None
+                and np.isfinite(e.width.width_m)
+                and e.width.width_m > 0
+            ]
+            if not widths:
+                return None
+            x = np.asarray(widths, dtype=float)
+            if x.size >= 4:
+                lo = float(np.percentile(x, 10))
+                hi = float(np.percentile(x, 90))
+            else:
+                lo = float(np.min(x))
+                hi = float(np.max(x))
+            return lo, hi
+
         meta = {
             "left_median": _median_of_estimates(left),
             "right_median": _median_of_estimates(right),
+            "left_width_range": _width_range_of_estimates(left),
+            "right_width_range": _width_range_of_estimates(right),
+            "all_width_range": _width_range_of_estimates((left or []) + (right or [])),
             "n_headings": {"left": len(left), "right": len(right)},
         }
 

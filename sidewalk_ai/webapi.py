@@ -163,6 +163,7 @@ class MultiSideObstacles(BaseModel):
 
 class MultiSideSummary(BaseModel):
     median_width: dict | None = None      # {"width_m": ..., "margin_m": ...}
+    width_range_m: dict | None = None     # {"min_m": ..., "max_m": ...}
     corridor: MultiSideCorridor | None = None
     obstacles: MultiSideObstacles | None = None
 
@@ -304,6 +305,7 @@ def analyse_multi(req: AddressMultiReq):
         lg = acc["LEFT"].global_stats
         per_side["LEFT"] = {
             "median_width": None,  # injeta abaixo com meta
+            "width_range_m": None,
             "corridor": corridor_block(acc["LEFT"]),
             "obstacles": {
                 "typical_obstacles_per_view": (
@@ -318,6 +320,7 @@ def analyse_multi(req: AddressMultiReq):
         rg = acc["RIGHT"].global_stats
         per_side["RIGHT"] = {
             "median_width": None,
+            "width_range_m": None,
             "corridor": corridor_block(acc["RIGHT"]),
             "obstacles": {
                 "typical_obstacles_per_view": (
@@ -336,6 +339,21 @@ def analyse_multi(req: AddressMultiReq):
     if rm and "RIGHT" in per_side:
         per_side["RIGHT"]["median_width"] = {"width_m": float(rm[0]), "margin_m": float(rm[1])}
 
+    # injeta faixas de largura por lado e global (quando disponíveis)
+    lw_range = (multi_metadata or {}).get("left_width_range")
+    rw_range = (multi_metadata or {}).get("right_width_range")
+    aw_range = (multi_metadata or {}).get("all_width_range")
+    if lw_range and "LEFT" in per_side:
+        per_side["LEFT"]["width_range_m"] = {
+            "min_m": float(lw_range[0]),
+            "max_m": float(lw_range[1]),
+        }
+    if rw_range and "RIGHT" in per_side:
+        per_side["RIGHT"]["width_range_m"] = {
+            "min_m": float(rw_range[0]),
+            "max_m": float(rw_range[1]),
+        }
+
     # ---------- bloco agregado ALL ----------
     g_all = acc["ALL"].global_stats
     all_views = {
@@ -347,6 +365,12 @@ def analyse_multi(req: AddressMultiReq):
         "typical_obstacles_per_view": (
             g_all.avg_obstacles_per_view_rounded
             or round_half_up(g_all.avg_obstacles_per_view or 0.0)
+        ),
+        "width_range_m": (
+            {
+                "min_m": float(aw_range[0]),
+                "max_m": float(aw_range[1]),
+            } if aw_range else None
         ),
     }
 

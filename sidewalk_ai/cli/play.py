@@ -195,6 +195,38 @@ def _print_tuple_results(obj):
     #lef_med = _median_of_estimates(left)
     #rig_med = _median_of_estimates(right)
 
+    # Estimated sidewalk width range (multi-view)
+    def _width_range(estimates):
+        vals = [
+            getattr(e.width, "width_m", None)
+            for e in estimates
+            if getattr(e, "width", None) is not None
+            and getattr(e.width, "width_m", None) is not None
+            and np.isfinite(e.width.width_m)
+            and e.width.width_m > 0
+        ]
+        if not vals:
+            return None
+        x = np.asarray(vals, dtype=float)
+        if x.size >= 4:
+            lo = float(np.percentile(x, 10))
+            hi = float(np.percentile(x, 90))
+        else:
+            lo = float(np.min(x))
+            hi = float(np.max(x))
+        return lo, hi
+
+    left_range = _width_range(left)
+    right_range = _width_range(right)
+    all_range = _width_range(list(left) + list(right))
+    print("\nESTIMATED SIDEWALK WIDTH RANGE (multi-view):")
+    if left_range:
+        print(f"  LEFT  ≈ {left_range[0]:.2f} to {left_range[1]:.2f} m")
+    if right_range:
+        print(f"  RIGHT ≈ {right_range[0]:.2f} to {right_range[1]:.2f} m")
+    if all_range:
+        print(f"  ALL   ≈ {all_range[0]:.2f} to {all_range[1]:.2f} m")
+
     # Print per-heading clearances and optionally write debug sheets
     def _print_and_debug_list(lst, side_name):
         # Print per-heading widths but aggregate clearances across headings
