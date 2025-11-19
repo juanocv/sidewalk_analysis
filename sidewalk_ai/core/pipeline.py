@@ -123,7 +123,6 @@ class SidewalkPipeline:
         req = ImageRequest(lat, lon, heading=int(heading), pitch=pitch, fov=fov)
         t0 = time.time()
         img_path = self.sv.fetch(req)
-        print(f"Image acquisition took {time.time() - t0:.4f} seconds")
         return self._analyse_path(
             img_path,
             pitch=pitch,
@@ -161,7 +160,6 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             t0 = time.time()
             img_path = self.sv.fetch(req)
-            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
             try:
                 left_estimates.append(
                     self._analyse_path(
@@ -180,7 +178,6 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=h, pitch=pitch, fov=fov)
             t0 = time.time()
             img_path = self.sv.fetch(req)
-            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
             try:
                 right_estimates.append(
                     self._analyse_path(
@@ -214,7 +211,6 @@ class SidewalkPipeline:
             req = ImageRequest(lat, lon, heading=int(use_heading), pitch=pitch, fov=fov)
             t0 = time.time()
             img_path = self.sv.fetch(req)
-            print(f"Image acquisition took {time.time() - t0:.4f} seconds")
             return self._analyse_path(
                 img_path,
                 pitch=pitch,
@@ -304,7 +300,6 @@ class SidewalkPipeline:
                 req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
                 t0 = time.time()
                 img_path = self.sv.fetch(req)
-                print(f"Image acquisition took {time.time() - t0:.4f} seconds")
                 img_rgb = read_rgb(img_path)
 
                 out = self.segmenter.segment(img_rgb)
