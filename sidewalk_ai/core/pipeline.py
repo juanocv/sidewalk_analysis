@@ -25,6 +25,14 @@ from sidewalk_ai.models.base import Segmenter
 from sidewalk_ai.models.midas import MidasEstimator
 
 
+_LOGO_BAR_PX = 20  # faixa inferior com a barra/logo do Google
+try:
+    from sidewalk_ai.io.image_io import get_google_bar_height_px as _swai_get_bar_height
+    _LOGO_BAR_PX = int(_swai_get_bar_height())
+except Exception:
+    # fallback silencioso para manter compatibilidade se o helper nǜo existir
+    pass
+
 WIDTH_PARAMS = {
     "band_mode": "adaptive",
     "adaptive_pct": (0.60, 0.95),   # ↓ faixa mais estreita (mais perto do observador)
@@ -33,7 +41,7 @@ WIDTH_PARAMS = {
     "min_valid_rows": 7,            # ↑ mediana mais robusta
     "divergence_pct": 0.25,         # ↓ troca p/ geom mais cedo quando divergir
     "use_data_driven_margin": True,
-    "bottom_ignore_px": 20,         # ignora a faixa com a logo
+    "bottom_ignore_px": _LOGO_BAR_PX,         # ignora a faixa com a logo
 }
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +106,46 @@ class SidewalkPipeline:
         self.refine = refine
         self.fuse_method = fuse_method
         self.initial_time = initial_time
+
+    # ------------------------------------------------------------------ #
+    # Depth helper                                                       #
+    # ------------------------------------------------------------------ #
+    def _predict_depth_without_logo(self, img_rgb: np.ndarray) -> np.ndarray:
+        """
+        Executa o estimador de profundidade ignorando a faixa inferior
+        com a logo do Google, mas devolvendo um mapa H×W alinhado com
+        a imagem original.
+
+        A segmentação continua enxergando a imagem inteira (incluindo
+        a barra), mas o modelo de profundidade nunca recebe esses pixels.
+        """
+        H, W = img_rgb.shape[:2]
+        bar = _LOGO_BAR_PX
+
+        if bar > 0 and H > bar:
+            core_img = img_rgb[:-bar, :, :]
+        else:
+            core_img = img_rgb
+
+        depth_core = self.depth_est.predict(core_img)
+        depth_core = np.asarray(depth_core, dtype=np.float32)
+
+        # MiDaS/Zoe já devolvem mesma resolução da entrada, mas mantemos
+        # uma checagem defensiva.
+        if depth_core.shape[:2] != core_img.shape[:2]:
+            raise RuntimeError(
+                f"Depth estimator returned shape {depth_core.shape} for input {core_img.shape}"
+            )
+
+        # Sem recorte? Basta devolver o resultado direto.
+        if core_img is img_rgb or bar <= 0 or H <= bar:
+            return depth_core
+
+        # Com recorte: remonta um mapa H�-W, deixando a faixa da logo como NaN.
+        depth_full = np.full((H, W), np.nan, dtype=np.float32)
+        h_core, w_core = depth_core.shape[:2]
+        depth_full[:h_core, :w_core] = depth_core
+        return depth_full
 
     # ------------------------------------------------------------------ #
     # Convenience overloads                                              #
@@ -298,7 +346,7 @@ class SidewalkPipeline:
         for heading in test_angles:
             try:
                 req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
-                t0 = time.time()
+                # t0 = time.time()
                 img_path = self.sv.fetch(req)
                 img_rgb = read_rgb(img_path)
 
@@ -307,16 +355,51 @@ class SidewalkPipeline:
                 if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
                     sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
+                sidewalk_mask = sidewalk_mask.astype(bool)
+
+                # Pré-processamento leve: fechar grandes oclusões (carros, arbustos)
+                # usando o mesmo tipo de bridge-fill da etapa de refinamento.
+                '''
+                try:
+                    bridged = bridge_fill_between_edges(
+                        sidewalk_mask.astype(np.uint8),
+                        smooth_kernel=5,
+                        min_valid_cols=5,
+                        clamp_to=sidewalk_mask.shape[0] - 30,
+                    ).astype(bool)
+                    mask_for_center = bridged
+                except Exception as bf_exc:
+                    print(f"Heading {heading}°: bridge-fill failed ({bf_exc}), using raw mask")
+                    mask_for_center = sidewalk_mask
+                '''
+
                 has_two = _has_two_curbs(sidewalk_mask, min_gap_px=50)
                 if has_two:
+                    h, w = sidewalk_mask.shape
                     cols = np.where(sidewalk_mask)[1]
                     if cols.size > 0:
-                        left_cov  = np.sum(cols <  sidewalk_mask.shape[1] // 2)
-                        right_cov = np.sum(cols >= sidewalk_mask.shape[1] // 2)
+                        # 1) equilíbrio esquerda/direita em área de calçada
+                        left_cov  = np.sum(cols <  w // 2)
+                        right_cov = np.sum(cols >= w // 2)
                         balance = min(left_cov, right_cov) / max(left_cov, right_cov, 1)
-                        score = balance
+
+                        # 2) continuidade vertical em ambas as calçadas
+                        y0 = int(0.30 * h)
+                        y1 = int(0.90 * h)
+                        if y1 <= y0:
+                            y0, y1 = 0, h
+                        band_h = max(1, y1 - y0)
+                        left_rows  = np.any(sidewalk_mask[y0:y1, : w // 2], axis=1)
+                        right_rows = np.any(sidewalk_mask[y0:y1, w // 2:], axis=1)
+                        frac_left_rows  = float(left_rows.sum()) / band_h
+                        frac_right_rows = float(right_rows.sum()) / band_h
+                        row_score = min(frac_left_rows, frac_right_rows)
+
+                        # score final combina equilíbrio e continuidade
+                        score = balance * row_score
                     else:
-                        score = 0.5
+                        score = 0.0
+
                     print(f"Heading {heading}°: Center found (score={score:.2f})")
                     if score > best_score:
                         best_score = score
@@ -338,8 +421,8 @@ class SidewalkPipeline:
     def _generate_heading_ranges(
         self,
         center_heading: int,
-        initial_offset: int = 40,
-        angle_step: int = 15,
+        initial_offset: int = 70,
+        angle_step: int = 10,
         max_deviation: int = 90,
     ) -> tuple[list[int], list[int]]:
         """
@@ -359,11 +442,23 @@ class SidewalkPipeline:
         left_headings, right_headings : tuple[list[int], list[int]]
             Lists of headings for left and right sides
         """
-        # Start at an initial offset (e.g., 40°) then step by angle_step up to
-        # max_deviation. This avoids sampling headings that are too near the
-        # street-center view which may still show both curbs and add noise.
+        # Gera offsets começando mais perto de `max_deviation` (perpendicular)
+        # e voltando em passos de `angle_step` até `initial_offset`. Assim,
+        # quando limitamos via `max_per_side`, priorizamos sempre os ângulos
+        # mais próximos de 90° (perpendicular e quase-perpendicular).
         def seq_offsets(sign: int) -> list[int]:
+            """Produce offsets starting at `initial_offset` and increasing by
+            `angle_step` up to `max_deviation`.
+
+            This yields offsets in the order: initial_offset,
+            initial_offset+angle_step, initial_offset+2*angle_step, ...
+            which matches the desired capture sequence (closest to
+            perpendicular first is controlled by initial_offset).
+            """
             offsets = []
+            # defensive: ensure sensible parameters
+            if angle_step <= 0 or max_deviation < initial_offset:
+                return offsets
             angle = initial_offset
             while angle <= max_deviation:
                 offsets.append(sign * angle)
@@ -427,12 +522,18 @@ class SidewalkPipeline:
         print(f"Obstacle extraction took {time.time() - initial_time:.4f} seconds")
 
         # -------- Depth ------------------------------------------------ #
-        depth_map = self.depth_est.predict(img_rgb)
-        
-        #metric = getattr(self.depth_est, "is_metric", False)
-        #m_cov = float(sidewalk_mask.mean())
-        #d_min, d_med, d_max = float(depth_map.min()), float(np.median(depth_map)), float(depth_map.max())
-        
+        depth_map = self._predict_depth_without_logo(img_rgb)
+
+        metric = getattr(self.depth_est, "is_metric", False)
+        m_cov = float(sidewalk_mask.mean())
+        valid_depth = np.isfinite(depth_map)
+        if valid_depth.any():
+            d_min = float(np.nanmin(depth_map))
+            d_med = float(np.nanmedian(depth_map))
+            d_max = float(np.nanmax(depth_map))
+        else:
+            d_min = d_med = d_max = float("nan")
+
         #print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
         #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
         #                    "depth_metric": bool(metric)})
@@ -441,9 +542,17 @@ class SidewalkPipeline:
         params = dict(WIDTH_PARAMS)
         #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
         width_res = compute_width(sidewalk_mask, depth_map, pitch_deg=pitch, fov_deg=fov, **params)
-       
+
+        # Aviso quando não há suporte suficiente de pixels para medir largura.
+        #if width_res.width_m <= 0.0 and m_cov < 0.05:
+            #print("[SWAI][warning]", {
+            #    "reason": "no_sidewalk_support",
+            #    "mask_coverage": m_cov,
+            #    "width_n_pixels": int(width_res.n_pixels),
+            #})
+
         #print(f"Width estimation {width_res}")
-        print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
+        #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")
 
         # -------- Geometry --------------------------------------------- #
         # Optionally compute obstacle clearances (pass empty list if none)

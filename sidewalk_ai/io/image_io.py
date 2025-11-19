@@ -41,6 +41,10 @@ class Settings(BaseSettings):
 
 _cfg = Settings()
 
+def get_google_bar_height_px() -> int:
+    """Return current configured height of the Google logo bar (in pixels)."""
+    return int(_cfg.google_bar_height_px)
+
 # ─── custom exceptions ────────────────────────────────────────────
 
 class ImageLoadError(RuntimeError):
