@@ -279,10 +279,26 @@ def compute_multiview_metrics(
     """
     Agrega métricas por lado (LEFT/RIGHT) e geral (ALL), concatenando
     todas as instâncias de CLEARANCES, com filtro de outliers por IQR.
+
+    Importante: vistas cuja largura estimada é inválida (width_m <= 0,
+    None ou não finita) são ignoradas no cálculo das métricas de
+    acessibilidade multi-view, para evitar que falhas de medição de
+    largura distorçam as estatísticas de corredor (mediana, desvio,
+    meets_ratio, etc.).
     """
     def _collect(res_iter: Iterable) -> List:
         cl = []
         for r in res_iter:
+            # Se o objeto tiver atributo `width`, use-o para filtrar
+            # vistas com largura inválida. Para chamadas legadas que
+            # passam apenas objetos com `.clearances` (sem `.width`),
+            # mantemos o comportamento antigo e não filtramos.
+            w_res = getattr(r, "width", Ellipsis)
+            if w_res is not Ellipsis:
+                w_val = getattr(w_res, "width_m", None)
+                if w_val is None or not np.isfinite(w_val) or w_val <= 0:
+                    # width_m inválido: ignore clearances desta vista
+                    continue
             cl.extend(getattr(r, "clearances", []) or [])
         return cl
 
