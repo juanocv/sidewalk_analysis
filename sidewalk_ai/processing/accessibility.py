@@ -172,7 +172,7 @@ class AccessibilityMetrics:
 # ------------------------- core -------------------------
 
 # fator do limiar intermediário (padrão 75% do threshold); pode ser ajustado por ENV
-_MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.75"))
+_MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
 
 def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.20) -> str:
     """
@@ -197,31 +197,36 @@ def compute_single_view_metrics(
 ) -> AccessibilityMetrics:
     items = list(clearances)
 
-    by_type: Dict[str, List[Tuple[float,float,float,float]]] = {}
+    # Build a mapping type -> list of raw clearance tuples
+    # We keep raw None/NaN values so we can exclude those with invalid total_m
+    by_type: Dict[str, List[Tuple[float | None, float | None, float | None, float | None]]] = {}
     for c in items:
         t = _label_to_type(c.label)
-        by_type.setdefault(t, []).append((
-            c.L_m or 0.0,
-            c.R_m or 0.0,
-            c.total_m or 0.0,
-            (c.obs_width if c.obs_width is not None else np.nan)
-        ))
+        L_val = getattr(c, 'L_m', None)
+        R_val = getattr(c, 'R_m', None)
+        total_val = getattr(c, 'total_m', None)
+        obs_w = getattr(c, 'obs_width', None)
+        by_type.setdefault(t, []).append((L_val, R_val, total_val, obs_w))
 
     per_type: Dict[str, PerTypeMetrics] = {}
     all_total = []
     all_obsw  = []
 
     for t, rows in by_type.items():
-        Ls = [r[0] for r in rows]
-        Rs = [r[1] for r in rows]
-        corridors = [v for v in [*Ls, *Rs] if v is not None]
-        Ws = [float(w) for (_,_,_,w) in rows if w is not None and np.isfinite(w)]
+        # Only consider clearances with a valid total_m for statistical metrics
+        valid_rows = [r for r in rows if (r[2] is not None and np.isfinite(r[2]))]
+
+        Ls = [r[0] for r in valid_rows if (r[0] is not None and np.isfinite(r[0]))]
+        Rs = [r[1] for r in valid_rows if (r[1] is not None and np.isfinite(r[1]))]
+        # pool L∪R from valid rows
+        corridors = [v for r in valid_rows for v in (r[0], r[1]) if (v is not None and np.isfinite(v))]
+        Ws = [float(w) for (_, _, _, w) in rows if (w is not None and np.isfinite(w))]
 
         per_type[t] = PerTypeMetrics(
-            count=len(rows),
+            count=len(rows),  # count includes all detected obstacles of this type
             free_left_m=_robust_stats(Ls),
             free_right_m=_robust_stats(Rs),
-            free_total_m=_robust_stats(corridors),   # pool L∪R
+            free_total_m=_robust_stats(corridors),   # pool L∪R from valid rows
             obs_width_m=_robust_stats(Ws) if Ws else None,
         )
 
