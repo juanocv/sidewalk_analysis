@@ -196,10 +196,7 @@ class SidewalkPipeline:
         if center_heading is None:
             center_heading = 0  # fallback robusto
 
-        left_headings, right_headings = self._generate_heading_ranges(center_heading)
-        if max_per_side is not None and max_per_side > 0:
-            left_headings  = left_headings[:max_per_side]
-            right_headings = right_headings[:max_per_side]
+        left_headings, right_headings = self._generate_heading_ranges(center_heading, max_per_side=max_per_side)
 
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
@@ -271,10 +268,7 @@ class SidewalkPipeline:
         if center_heading is None:
             center_heading = heading if heading is not None else 0  # fallback
 
-        left_headings, right_headings = self._generate_heading_ranges(center_heading)
-        if max_per_side is not None and max_per_side > 0:
-            left_headings  = left_headings[:max_per_side]
-            right_headings = right_headings[:max_per_side]
+        left_headings, right_headings = self._generate_heading_ranges(center_heading, max_per_side=max_per_side)
 
         left_estimates: list[Result] = []
         right_estimates: list[Result] = []
@@ -422,8 +416,9 @@ class SidewalkPipeline:
         self,
         center_heading: int,
         initial_offset: int = 70,
-        angle_step: int = 10,
-        max_deviation: int = 90,
+        angle_step: int = 5,
+        max_deviation: int = 120,
+        max_per_side: int | None = None,
     ) -> tuple[list[int], list[int]]:
         """
         Generate heading ranges for left and right sides from center.
@@ -462,6 +457,8 @@ class SidewalkPipeline:
             angle = initial_offset
             while angle <= max_deviation:
                 offsets.append(sign * angle)
+                if max_per_side is not None and len(offsets) >= max_per_side:
+                    break
                 angle += angle_step
             return offsets
 
