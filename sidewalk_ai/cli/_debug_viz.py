@@ -7,6 +7,13 @@ from sidewalk_ai.io.image_io import read_rgb
 from ._builder import LABEL_MAP
 from detectron2.data.catalog import MetadataCatalog
 
+def _project_root() -> Path:
+    """Return the repository root (two levels above this file)."""
+    try:
+        return Path(__file__).resolve().parents[2]
+    except Exception:
+        return Path.cwd()
+
 def make_palette():
     rng = np.random.default_rng(0)
     lut = rng.integers(0,255,(256,3),np.uint8); lut[0]=(0,0,255); return lut
@@ -305,6 +312,8 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
     
 def write_debug_sheet(res, pipeline, args, segmenter):
     outdir: Path = args.outdir; outdir.mkdir(exist_ok=True, parents=True)
+    debug_mode = bool(getattr(args, "debug", False))
+    project_root = _project_root()
     # Prefer the image stored inside the Result (if available). Fallback to
     # res.img_path (load from disk) and finally pipeline._last_rgb.
     img_rgb = getattr(res, 'rgb_image', None)
@@ -319,8 +328,11 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     if img_rgb is None:
         raise RuntimeError("No RGB image available to build debug sheet")
     img_bgr      = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    img_label = getattr(img_path_used, 'name', None) or getattr(getattr(args, 'image', None), 'name', None) or "image"
+    stem = getattr(img_path_used, 'stem', None) or getattr(getattr(args, 'image', None), 'stem', None) or img_label.replace('.', '_')
     h, w         = img_bgr.shape[:2]
     tiles        = []
+    panoptic_tile_for_save = None
 
     # 1 panoptic overlay + legend
     is_ensemble = "+" in args.seg
@@ -357,11 +369,12 @@ def write_debug_sheet(res, pipeline, args, segmenter):
 
         for i,sid in enumerate(uniq):
             label_name = _label(int(sid), segmenter, segments_info_to_use)
+            label_text = label_name
             color = lut[int(sid) % 256].tolist()
             cv2.rectangle(legend, (5, i*22+5), (25, i*22+20), color, -1)
             cv2.putText(
                 legend,
-                label_name[:20],
+                label_text[:20],
                 (30, i*22+18),  # Increased max length
                 cv2.FONT_HERSHEY_SIMPLEX,
                 .5,
@@ -369,7 +382,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
                 1,
             )
         # >>> NOVO: desenhar rótulos de obstáculos (tree#1, pole#ins7:0, etc.)
-        obs_for_viz = getattr(res, "obstacles", None)
+        obs_for_viz = None  # disable obstacle-base overlay on debug view
         if obs_for_viz:
             for (olabel, omask) in obs_for_viz:
                 m = omask.astype(bool)
@@ -389,7 +402,8 @@ def write_debug_sheet(res, pipeline, args, segmenter):
 
         # normaliza a altura da legenda para combinar com a imagem SEM redimensionar (sem compressão)
         legend = _pad_or_crop_height(legend, h)  # onde h é a altura do overlay/img_bgr
-        tiles.append(add_title(np.hstack([overlay, legend]), "Panoptic overlay"))
+        panoptic_tile_for_save = add_title(np.hstack([overlay, legend]), "Panoptic overlay")
+        tiles.append(panoptic_tile_for_save)
 
     # 2 refined overlay
     # tiles.append(add_title(overlay_mask(img_bgr,res.refined_mask.astype(bool)),"Sidewalk (refined mask)"))
@@ -467,7 +481,24 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     legend_depth = _pad_or_crop_height(legend_depth, depth_color.shape[0])
 
     depth_tile = np.hstack([depth_color, legend_depth])
-    tiles.append(add_title(depth_tile, f"Depth ({depth_model_name})"))
+    depth_tile_titled = add_title(depth_tile, f"Depth ({depth_model_name})")
+    tiles.append(depth_tile_titled)
+
+    base_name = f"{stem}_{args.seg.replace('+', '_')}_{depth_model_name.lower().replace('-', '_')}"
+
+    def _save_debug_image(img_bgr: np.ndarray | None, suffix: str) -> None:
+        if img_bgr is None:
+            return
+        try:
+            out_path = project_root / f"{base_name}_{suffix}.png"
+            cv2.imwrite(str(out_path), cv2.cvtColor(img_bgr, cv2.COLOR_RGB2BGR))
+            print(f"[debug_viz] wrote {out_path}")
+        except Exception as exc:
+            print(f"[debug_viz] failed to write {suffix}: {exc}")
+
+    if debug_mode:
+        _save_debug_image(panoptic_tile_for_save, "panoptic")
+        _save_debug_image(depth_tile_titled, "depth")
 
     # grid + header/footer
     tile_h, tile_w = tiles[0].shape[:2]
@@ -483,12 +514,6 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- HEADER ------------------------------------------------
     hdr_h = 40
     header = np.full((hdr_h, grid.shape[1], 3), 30, np.uint8)
-    # Build a sensible image name for header/filename
-    img_label = None
-    if img_path_used is not None:
-        img_label = getattr(img_path_used, 'name', None)
-    if img_label is None:
-        img_label = getattr(getattr(args, 'image', None), 'name', None) or "image"
     text = f"{img_label}   |   seg={args.seg}   |   depth={depth_model_name}"
     cv2.putText(header, text, (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
@@ -515,12 +540,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # ---------- COMPOSE ----------------------------------------------
     composite = np.vstack([header, grid, footer])
 
-    stem = None
-    if img_path_used is not None:
-        stem = getattr(img_path_used, 'stem', None)
-    if stem is None:
-        stem = getattr(getattr(args, 'image', None), 'stem', None) or img_label.replace('.', '_')
-    fname = f"{stem}_{args.seg.replace('+', '_')}_{depth_model_name.lower().replace('-', '_')}.png"
+    fname = f"{base_name}.png"
     cv2.imwrite(str(outdir / fname), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
     
 def plot_clearance_overlay_debug(
