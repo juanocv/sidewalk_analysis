@@ -39,8 +39,14 @@ def log(msg: str):
     if args.debug:
         print("[DBG]", msg)
 
-# ――― expose the fallback scale so geometry.compute_width() can read it
+# Propaga flag de debug para o restante do pipeline (ex.: geometry._swai_log)
 import os
+if args.debug:
+    os.environ["SWAI_DEBUG"] = "1"
+else:
+    os.environ.pop("SWAI_DEBUG", None)
+
+# ――― expose the fallback scale so geometry.compute_width() can read it
 os.environ.setdefault("SWAI_FALLBACK_SCALE", str(args.fallback_scale))
 if args.force_fallback:
     os.environ["SWAI_FORCE_FALLBACK"] = "1"
@@ -54,6 +60,7 @@ depth = build_depth(args.depth, variant=args.zoe_variant, device=args.device)
 streetview = sw.StreetViewClient()
 pipe       = sw.SidewalkPipeline(segmenter=segmenter,
                                  depth=depth,
+                                 args=args,
                                  streetview=streetview)
 print(f"Pipeline building took {time.time() - initial_time:.4f} seconds")
 

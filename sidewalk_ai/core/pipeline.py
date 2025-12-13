@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import time
+import time, os
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -33,6 +33,20 @@ except Exception:
     # fallback silencioso para manter compatibilidade se o helper nǜo existir
     pass
 
+# --- DEBUG HELPERS ---
+def _swai_debug_on():
+    val = os.getenv("SWAI_DEBUG", "0").lower()
+    return val not in ("0", "false", "off", "")
+
+def _swai_log(tag, payload):
+    if not _swai_debug_on():
+        return
+    try:
+        import json
+        print(f"[SWAI][{tag}] " + json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        print(f"[SWAI][{tag}] {payload}")
+
 WIDTH_PARAMS = {
     "band_mode": "adaptive",
     "adaptive_pct": (0.60, 0.95),   # ↓ faixa mais estreita (mais perto do observador)
@@ -42,6 +56,9 @@ WIDTH_PARAMS = {
     "divergence_pct": 0.25,         # ↓ troca p/ geom mais cedo quando divergir
     "use_data_driven_margin": True,
     "bottom_ignore_px": _LOGO_BAR_PX,         # ignora a faixa com a logo
+    # debug output
+    "debug_dir": Path(__file__).parent.parent.parent / "debug_out",
+    "debug_prefix": "frame_"
 }
 
 # --------------------------------------------------------------------------- #
@@ -97,12 +114,14 @@ class SidewalkPipeline:
         depth: MidasEstimator,
         streetview: StreetViewClient,
         refine: bool = True,
+        args = None,
         fuse_method: str | None = None,
         initial_time: float = None,
     ) -> None:
         self.segmenter = segmenter
         self.depth_est = depth
         self.sv = streetview
+        self.args = args
         self.refine = refine
         self.fuse_method = fuse_method
         self.initial_time = initial_time
@@ -531,22 +550,36 @@ class SidewalkPipeline:
         else:
             d_min = d_med = d_max = float("nan")
 
-        #print("[SWAI][frame]", {"img": str(img_path), "mask_coverage": m_cov,
-        #                    "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
-        #                    "depth_metric": bool(metric)})
+        _swai_log("depth", {"img": str(img_path), "mask_coverage": m_cov,
+                            "depth_min": d_min, "depth_med": d_med, "depth_max": d_max,
+                            "is_metric": metric})
 
         # -------- Width ------------------------------------------------ #
         params = dict(WIDTH_PARAMS)
-        #params.update(kw)  # sobrescreve com overrides de ambiente, se houver
-        width_res = compute_width(sidewalk_mask, depth_map, pitch_deg=pitch, fov_deg=fov, **params)
+        debug_flag = bool(getattr(self.args, "debug", False))
+        if debug_flag:
+            params["debug_dir"] = getattr(self.args, "outdir", params.get("debug_dir"))
+            params["debug_prefix"] = params.get("debug_prefix", "frame_")
+        else:
+            params.pop("debug_dir", None)
+            params.pop("debug_prefix", None)
+
+        width_res = compute_width(
+            sidewalk_mask,
+            depth_map,
+            pitch_deg=pitch,
+            fov_deg=fov,
+            debug=debug_flag,
+            **params,
+        )
 
         # Aviso quando não há suporte suficiente de pixels para medir largura.
-        #if width_res.width_m <= 0.0 and m_cov < 0.05:
-            #print("[SWAI][warning]", {
-            #    "reason": "no_sidewalk_support",
-            #    "mask_coverage": m_cov,
-            #    "width_n_pixels": int(width_res.n_pixels),
-            #})
+        if width_res.width_m <= 0.0 and m_cov < 0.05:
+            print("[SWAI][warning]", {
+                "reason": "no_sidewalk_support",
+                "mask_coverage": m_cov,
+                "width_n_pixels": int(width_res.n_pixels),
+            })
 
         #print(f"Width estimation {width_res}")
         #print(f"Width estimation took {time.time() - initial_time:.4f} seconds")

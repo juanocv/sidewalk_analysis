@@ -2,10 +2,26 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np, torch
+import os
 
 _VARIANTS = {"zoed_n": "ZoeD_N",
              "zoed_k": "ZoeD_K",
              "zoed_nk": "ZoeD_NK"}
+
+# --- DEBUG HELPERS ---
+def _swai_debug_on():
+    val = os.getenv("SWAI_DEBUG", "0").lower()
+    return val not in ("0", "false", "off", "")
+
+def _swai_log(tag, payload):
+    if not _swai_debug_on():
+        return
+    try:
+        import json
+        print(f"[SWAI][{tag}] " + json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        print(f"[SWAI][{tag}] {payload}")
+# ------------------------------------------------------
 
 class ZoeDepthEstimator:
     """
@@ -105,11 +121,11 @@ class ZoeDepthEstimator:
         depth = np.clip(depth, 0.1, 100.0)
         depth = np.nan_to_num(depth, nan=5.0, posinf=100.0, neginf=0.1)
 
-        # (opcional) log:
-        #print("[SWAI][zoe]", {
-        #    "variant": self._variant,
-        #    "depth_min": float(depth.min()),
-        #    "depth_med": float(np.median(depth)),
-        #    "depth_max": float(depth.max())
-        #})
+        #(opcional) log:
+        _swai_log("zoe", {
+            "variant": self._variant,
+            "depth_min": float(depth.min()),
+            "depth_med": float(np.median(depth)),
+            "depth_max": float(depth.max())
+        })
         return depth

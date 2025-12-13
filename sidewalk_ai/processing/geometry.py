@@ -11,7 +11,8 @@ import numpy as np
 
 # --- DEBUG HELPERS ---
 def _swai_debug_on():
-    return False # set via env var or CLI in future
+    val = os.getenv("SWAI_DEBUG", "0").lower()
+    return val not in ("0", "false", "off", "")
 
 def _swai_log(tag, payload):
     if not _swai_debug_on():
@@ -234,6 +235,22 @@ def aggregate_headings(widths_per_heading, min_k=5):
 # 2)  Public API – what the pipeline will call
 # --------------------------------------------------------------------------- #
 
+@dataclass(slots=True)
+class _WidthDebugRow:
+    v: int
+    uL: int
+    uR: int
+    du: int
+    width_geom: Optional[float] = None
+    width_depth: Optional[float] = None
+    near_perp: bool = False
+    skipped_du: bool = False
+    from_retry: bool = False
+    bridged_gap: bool = False
+    used_depth: bool = False
+    parallax: Optional[float] = None
+
+
 def compute_width(
     sidewalk:      np.ndarray,          # bool mask (H×W)
     depth:         np.ndarray | None = None,
@@ -251,6 +268,10 @@ def compute_width(
     use_data_driven_margin: bool = True,
     divergence_pct: float = 0.25,                       # ↓
     bottom_ignore_px: int = 20,                          # ignora a faixa com a logo
+    # debug
+    debug: bool = False,
+    debug_dir: Optional[str] = None,
+    debug_prefix: str = "compute_width"
 ) -> WidthResult:
     """
     Robust width estimation with:
@@ -262,6 +283,7 @@ def compute_width(
     H, W = sidewalk.shape
     H_eff = max(1, int(H) - int(bottom_ignore_px))  # ignora rodapé (logo)
     sidewalk = sidewalk.astype(bool)
+    log = _swai_log if debug else (lambda *args, **kwargs: None)
 
     # heurísticas suaves para frames sem parallax
     DEPTH_MED = float(np.median(depth[np.isfinite(depth)])) if (depth is not None and np.isfinite(depth).any()) else None
@@ -283,6 +305,7 @@ def compute_width(
 
     # profundidade por linha (somente quando parallax válido)
     widths_depth:    list[float] = []
+    debug_rows:      list[_WidthDebugRow] = []
 
     parallax_valid_count = 0
     total_rows_considered = 0
@@ -292,7 +315,7 @@ def compute_width(
     fx, fy, cx, cy = _intrinsics_after_crop(W, fov_deg)
     v_h = cy - fy * np.tan(np.radians(pitch_deg))
 
-    _swai_log("intrinsics", {
+    log("intrinsics", {
     "W": int(W), "H": int(H), "FOV_deg": float(fov_deg), "pitch_deg": float(pitch_deg),
     "fx": float(fx), "fy": float(fy), "cx": float(cx), "cy": float(cy), "v_h": float(v_h)
     })
@@ -335,7 +358,7 @@ def compute_width(
     band_cov = float(band.sum()) / float(band.size) if band.size else 0.0
     cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))
 
-    _swai_log("band", {
+    log("band", {
         "mode": band_mode, "y0": int(y0), "y1": int(y1),
         "height": int(y1 - y0), "cov": band_cov
     })
@@ -355,7 +378,7 @@ def compute_width(
         DU_LO_FLOOR, du_lo_base
     ))
 
-    _swai_log("du_gating", {
+    log("du_gating", {
         "du_lo_eff": int(du_lo_eff), "du_hi": int(du_hi),
         "du_prior": float(du_prior), "cov_norm": float(cov_norm)
     })
@@ -389,7 +412,7 @@ def compute_width(
         return frac, gap
 
     frac_dom, gap_cols = _continuity_score(sidewalk, y0, y1)
-    _swai_log("continuity", {
+    log("continuity", {
         "frac_dom": float(frac_dom),
         "gap_cols": int(gap_cols)
     })
@@ -399,7 +422,7 @@ def compute_width(
     # - NÃO descartamos por gap (oclusão é esperada); exigimos só linhas válidas depois
     cont_min = 0.25 + 0.25 * cov_norm   # 0.30–0.60
     if frac_dom < cont_min:
-        _swai_log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
+        log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
         return WidthResult(0.0, 0.0, 0)
 
 
@@ -413,6 +436,7 @@ def compute_width(
         cols = np.where(sidewalk[v])[0]
         if cols.size < 2:
             continue
+        bridged = False
         # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
         if cols.size >= 2:
             cs = np.sort(cols)
@@ -430,6 +454,7 @@ def compute_width(
                     bridge = np.arange(left_end, right_beg+1, dtype=int)
                     cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
                     cols = cs
+                    bridged = True
         # q cresce com a cobertura: 0.22 → 0.30
         q = 0.22 + 0.08 * cov_norm
         uL_q = int(np.quantile(cols, q))
@@ -445,8 +470,14 @@ def compute_width(
 
         was_near_perp = (du > du_hi)
         rows_seen += 1
+        row_dbg = _WidthDebugRow(
+            v=int(v), uL=int(uL), uR=int(uR), du=int(du),
+            near_perp=bool(was_near_perp), from_retry=False, bridged_gap=bridged
+        )
         if du < du_lo_eff:
             skip_du += 1
+            row_dbg.skipped_du = True
+            debug_rows.append(row_dbg)
             continue
 
         if du > du_hi:
@@ -464,6 +495,9 @@ def compute_width(
 
             # se ainda ficou grande, trata como extremo: só geom + clamp de Z
             if du2 > du_hi or (uR2 <= uL2 + 5):
+                row_dbg.uL = int(uL2)
+                row_dbg.uR = int(uR2)
+                row_dbg.du = int(du2)
                 total_rows_considered += 1
                 XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
                                                   np.array([v], dtype=np.float32),
@@ -478,10 +512,15 @@ def compute_width(
                 if np.isfinite(XL) and np.isfinite(XR):
                     widths_geom_raw.append(abs(XR - XL))
                     du_list.append(int(du))
+                    row_dbg.width_geom = float(abs(XR - XL))
+                debug_rows.append(row_dbg)
                 continue
 
             # caso "ajustado": substitui bordas e segue
             uL, uR, du = uL2, uR2, du2
+            row_dbg.uL = int(uL)
+            row_dbg.uR = int(uR)
+            row_dbg.du = int(du)
 
         total_rows_considered += 1
 
@@ -502,6 +541,7 @@ def compute_width(
                 widths_geom_raw.append(abs(XR - XL))
                 du_list.append(int(du))
                 was_near_perp_count += 1
+                row_dbg.width_geom = float(abs(XR - XL))
             else:
                 # --- clamp "suave" guiado pelo Zoe quando parallax for inexistente ---
                 if DEPTH_MED is not None:
@@ -514,11 +554,14 @@ def compute_width(
                     XR = (uR - cx) * ZR / fx
                     widths_geom_raw.append(abs(XR - XL))
                     du_list.append(int(du))
+                    row_dbg.width_geom = float(abs(XR - XL))
                 else:
-                    widths_geom_raw.append(abs(float(XR_g[0] - XL_g[0])))
+                    width_geom_val = abs(float(XR_g[0] - XL_g[0]))
+                    widths_geom_raw.append(width_geom_val)
                     du_list.append(int(du))
+                    row_dbg.width_geom = float(width_geom_val)
 
-
+        par = None
         # Depth-assisted path (safe indexing)
         if depth is not None:
             # ensure integer indices and in-bounds
@@ -549,13 +592,18 @@ def compute_width(
                 XL_d = (uL - cx) * ZL / fx
                 XR_d = (uR - cx) * ZR / fx
                 if np.isfinite(XL_d) and np.isfinite(XR_d):
-                    widths_depth.append(abs(float(XR_d - XL_d)))
+                    depth_width_val = abs(float(XR_d - XL_d))
+                    widths_depth.append(depth_width_val)
+                    row_dbg.width_depth = float(depth_width_val)
+                    row_dbg.used_depth = True
+            row_dbg.parallax = float(par) if par is not None else None
+        debug_rows.append(row_dbg)
 
     # fallback leve: se todas as linhas foram descartadas por Δu, tenta subir o band em 20 px uma vez
     if total_rows_considered == 0 and skip_du == rows_seen and (y0 > int(v_h) + 25):
         y0b = max(int(v_h) + 5, y0 - 20)
         y1b = max(y0b + 1, y1 - 20)
-        _swai_log("band_retry", {"y0_old": int(y0), "y1_old": int(y1), "y0_new": int(y0b), "y1_new": int(y1b)})
+        log("band_retry", {"y0_old": int(y0), "y1_old": int(y1), "y0_new": int(y0b), "y1_new": int(y1b)})
         v_rows = np.arange(y0b, y1b)
         band_b = sidewalk[y0b:y1b].astype(np.uint8)
         band_cov_b = float(band_b.sum()) / float(band_b.size) if band_b.size else 0.0
@@ -566,6 +614,7 @@ def compute_width(
             cols = np.where(sidewalk[v])[0]
             if cols.size < 2:
                 continue
+            bridged = False
             # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
             if cols.size >= 2:
                 cs = np.sort(cols)
@@ -583,6 +632,7 @@ def compute_width(
                         bridge = np.arange(left_end, right_beg+1, dtype=int)
                         cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
                         cols = cs
+                        bridged = True
             # quantis internos (iguais ao loop principal)
             q = 0.22 + 0.08 * cov_norm_b
             uL_q = int(np.quantile(cols, q))
@@ -593,7 +643,13 @@ def compute_width(
                 uL, uR = uL_q, uR_q
             du = uR - uL
             was_near_perp = (du > du_hi)
+            row_dbg = _WidthDebugRow(
+                v=int(v), uL=int(uL), uR=int(uR), du=int(du),
+                near_perp=bool(was_near_perp), from_retry=True, bridged_gap=bridged
+            )
             if du < du_lo_eff:
+                row_dbg.skipped_du = True
+                debug_rows.append(row_dbg)
                 continue
             if du > du_hi:
                 # === near-perp: traga as bordas para um DU alvo estável ===
@@ -610,6 +666,9 @@ def compute_width(
 
                 # Se ainda ficou muito grande, trate como extremo: só geom + clamp de Z
                 if du2 > du_hi or (uR2 <= uL2 + 5):
+                    row_dbg.uL = int(uL2)
+                    row_dbg.uR = int(uR2)
+                    row_dbg.du = int(du2)
                     total_rows_considered += 1
                     XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
                                                     np.array([v], dtype=np.float32),
@@ -624,10 +683,15 @@ def compute_width(
                     if np.isfinite(XL) and np.isfinite(XR):
                         widths_geom_raw.append(abs(XR - XL))
                         du_list.append(int(du))
+                        row_dbg.width_geom = float(abs(XR - XL))
+                    debug_rows.append(row_dbg)
                     continue
 
                 # Caso “ajustado”: substitui bordas e segue fluxo normal
                 uL, uR, du = uL2, uR2, du2
+                row_dbg.uL = int(uL)
+                row_dbg.uR = int(uR)
+                row_dbg.du = int(du)
 
             # só geométrico no retry
             XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
@@ -644,12 +708,17 @@ def compute_width(
                     XR = (uR - cx) * ZR / fx
                     widths_geom_raw.append(abs(XR - XL))
                     du_list.append(int(du))
+                    row_dbg.width_geom = float(abs(XR - XL))
                     was_near_perp_count += 1
                 else:
-                    widths_geom_raw.append(abs(float(XR_g[0] - XL_g[0])))
+                    width_geom_val = abs(float(XR_g[0] - XL_g[0]))
+                    widths_geom_raw.append(width_geom_val)
                     du_list.append(int(du))
+                    row_dbg.width_geom = float(width_geom_val)
 
-    _swai_log("rows_counters", {
+            debug_rows.append(row_dbg)
+
+    log("rows_counters", {
         "rows_seen": int(rows_seen),
         "rows_considered": int(total_rows_considered),
         "skipped_du": int(skip_du),
@@ -703,7 +772,7 @@ def compute_width(
             alpha = float(np.clip(0.35 + 0.40*(1.0 - par_frac) + 0.15*(1.0 - cov_norm), 0.35, 0.85))
             # ^ aqui (1.0 - 0.0) representa "100% sem parallax"; se você computar par_frac>0, use (1.0 - par_frac)
 
-            _swai_log("soft_adjust_du", {
+            log("soft_adjust_du", {
                 "reason": "parallax==0",
                 "med_du": med_du,
                 "du_from_depth": du_from_depth,
@@ -747,7 +816,7 @@ def compute_width(
                 keep = du_arr >= du_thresh
                 if int(keep.sum()) >= max(min_rows_eff, 3):
                     widths_geom_for_agg = [w for w, k in zip(widths_geom_final, keep) if k]
-                    _swai_log("du_focus", {
+                    log("du_focus", {
                         "du_p10": du_p10,
                         "du_p90": du_p90,
                         "du_spread": du_spread,
@@ -764,7 +833,7 @@ def compute_width(
     if iqr_d is not None and np.isfinite(iqr_d) and abs(iqr_d) < 1e-3:
         iqr_d = 0.0
 
-    _swai_log("agg_pre", {
+    log("agg_pre", {
         "n_geom": len(widths_geom_final), "n_depth": len(widths_depth),
         "med_g": None if np.isnan(med_g) else float(med_g),
         "iqr_g": None if np.isnan(iqr_g) else float(iqr_g),
@@ -779,7 +848,7 @@ def compute_width(
         if len(widths_geom_final) >= 3:
             width_fallback = float(np.median(widths_geom_final))
             margin_fb = max((err_pct / 100.0) * width_fallback, 0.35 * width_fallback)
-            _swai_log("result_lowconf", {
+            log("result_lowconf", {
                 "width": width_fallback, "margin": margin_fb,
                 "nrows": int(len(widths_geom_final))
             })
@@ -797,12 +866,12 @@ def compute_width(
     depth_reliable = depth_reliable_base and (par_frac >= 0.6)
     geom_reliable  = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_rows_eff)
 
-    _swai_log("parallax", {
+    log("parallax", {
         "parallax_valid_count": int(parallax_valid_count),
         "total_rows_considered": int(total_rows_considered),
         "par_frac": float(par_frac)
     })
-    _swai_log("reliability", {
+    log("reliability", {
         "depth_reliable": bool(depth_reliable),
         "geom_reliable": bool(geom_reliable)
     })
@@ -810,13 +879,13 @@ def compute_width(
     # preferência por geom quando near-perp domina
     if near_perp_dominante:
         depth_reliable = False
-        _swai_log("near_perp_force_geom", {"near_perp_rows": int(near_perp_flag_rows), "rows_seen": int(rows_seen)})
+        log("near_perp_force_geom", {"near_perp_rows": int(near_perp_flag_rows), "rows_seen": int(rows_seen)})
 
     # decisão final
     if depth_reliable and geom_reliable:
         denom = max(1e-6, max(med_d, med_g))
         div = abs(med_d - med_g) / denom
-        _swai_log("divergence", {
+        log("divergence", {
             "med_d": None if np.isnan(med_d) else float(med_d),
             "med_g": None if np.isnan(med_g) else float(med_g),
             "div": float(div),
@@ -828,7 +897,7 @@ def compute_width(
     else:
         chosen = "geom"
 
-    _swai_log("chosen", {"chosen": chosen})
+    log("chosen", {"chosen": chosen})
     if chosen == "depth":
         width, iqr, nrows = float(med_d), iqr_d, len(widths_depth)
         if geom_reliable and np.isfinite(med_g):
@@ -844,7 +913,7 @@ def compute_width(
 
             geom_floor = geom_floor_frac * G
             if width < geom_floor:
-                _swai_log("depth_geom_floor", {
+                log("depth_geom_floor", {
                     "med_d": float(med_d),
                     "med_g": float(med_g),
                     "width_before": width,
@@ -865,9 +934,122 @@ def compute_width(
     margin = (0.5 * iqr) if (use_data_driven_margin and iqr and np.isfinite(iqr) and iqr > 0) \
             else (err_pct / 100.0) * width
 
-    _swai_log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
+    if debug:
+        try:
+            debug_path = _plot_compute_width_debug(
+                sidewalk_mask=sidewalk,
+                rows_dbg=debug_rows,
+                y0=int(y0), y1=int(y1),
+                width=float(width),
+                margin=float(margin),
+                chosen=chosen,
+                du_lo=int(du_lo_eff),
+                du_hi=int(du_hi),
+                out_dir=debug_dir,
+                prefix=debug_prefix
+            )
+            log("debug_plot", {"path": debug_path})
+        except Exception as e:
+            log("debug_plot_error", {"error": str(e)})
+
+    log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
     return WidthResult(float(width), float(margin), int(nrows))
 
+
+def _plot_compute_width_debug(
+    sidewalk_mask: np.ndarray,
+    rows_dbg: Sequence[_WidthDebugRow],
+    y0: int, y1: int,
+    width: float, margin: float,
+    chosen: str,
+    du_lo: int, du_hi: int,
+    out_dir: Optional[str] = None,
+    prefix: str = "compute_width"
+) -> str:
+    """
+    Gera uma figura de debug mostrando:
+      - máscara + banda y0:y1 + bordas por linha (cores por motivo de uso/descarta);
+      - larguras por linha (geom/depth) vs y;
+      - histograma de Δu com limites;
+      - resumo textual.
+    """
+    H, W = sidewalk_mask.shape
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Mask view with band and per-row segments
+    ax0 = axs[0, 0]
+    ax0.imshow(sidewalk_mask, cmap="gray", origin="upper")
+    ax0.axhspan(y0, y1, color="yellow", alpha=0.15, label="banda")
+    for r in rows_dbg:
+        if r.skipped_du:
+            c = "red"
+        elif r.near_perp:
+            c = "orange"
+        else:
+            c = "lime"
+        ax0.plot([r.uL, r.uR], [r.v, r.v], color=c, linewidth=1.0, alpha=0.9)
+    ax0.set_title("Máscara, banda e bordas por linha")
+    ax0.set_xlim(0, W)
+    ax0.set_ylim(H, 0)
+
+    # Widths vs row
+    ax1 = axs[0, 1]
+    ys_geom = [r.v for r in rows_dbg if r.width_geom is not None]
+    w_geom = [r.width_geom for r in rows_dbg if r.width_geom is not None]
+    ys_depth = [r.v for r in rows_dbg if r.width_depth is not None]
+    w_depth = [r.width_depth for r in rows_dbg if r.width_depth is not None]
+    if ys_geom:
+        ax1.scatter(w_geom, ys_geom, s=12, c="lime", label="geom", alpha=0.7)
+    if ys_depth:
+        ax1.scatter(w_depth, ys_depth, s=12, c="cyan", label="depth", alpha=0.7, marker="x")
+    ax1.axvline(width, color="blue", linestyle="--", label=f"escolhido ({chosen})")
+    ax1.axvspan(max(0.0, width - margin), width + margin, color="blue", alpha=0.1, label="margem")
+    ax1.invert_yaxis()
+    ax1.set_xlabel("largura (m)")
+    ax1.set_ylabel("linha (y)")
+    ax1.set_title("Larguras por linha")
+    if ax1.has_data():
+        ax1.legend(loc="best")
+
+    # Δu histogram
+    ax2 = axs[1, 0]
+    du_vals = [r.du for r in rows_dbg if not r.skipped_du]
+    if du_vals:
+        ax2.hist(du_vals, bins=20, color="gray", alpha=0.8)
+    ax2.axvline(du_lo, color="green", linestyle="--", label=f"Δu min {du_lo}")
+    ax2.axvline(du_hi, color="red", linestyle="--", label=f"Δu max {du_hi}")
+    ax2.set_xlabel("Δu (px)")
+    ax2.set_ylabel("contagem de linhas")
+    ax2.set_title("Distribuição de Δu na banda")
+    ax2.legend(loc="best")
+
+    # Summary text
+    ax3 = axs[1, 1]
+    ax3.axis("off")
+    total_rows = len([r for r in rows_dbg if not r.skipped_du])
+    near_perp_rows = len([r for r in rows_dbg if r.near_perp])
+    depth_rows = len([r for r in rows_dbg if r.width_depth is not None])
+    bridged_rows = len([r for r in rows_dbg if r.bridged_gap])
+    par_vals = [r.parallax for r in rows_dbg if r.parallax is not None]
+    summary_lines = [
+        f"Banda y0={y0}, y1={y1} (h={y1 - y0}px)",
+        f"Linhas válidas: {total_rows} | near-perp: {near_perp_rows} | bridged: {bridged_rows}",
+        f"Geom linhas: {len(ys_geom)} | Depth linhas: {depth_rows}",
+        f"Width escolhido: {width:.2f} m ± {margin:.2f} m ({chosen})",
+    ]
+    if par_vals:
+        summary_lines.append(f"Parallax mediana: {float(np.median(par_vals)):.3f}")
+    ax3.text(0.01, 0.98, "\n".join(summary_lines), va="top", ha="left", fontsize=10)
+
+    fig.tight_layout()
+    if out_dir is None:
+        out_path = f"{prefix}.png"
+    else:
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{prefix}.png")
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
 
 def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int = 6) -> np.ndarray:
     """Select bottom `percent` of True pixels in mask by y-coordinate."""

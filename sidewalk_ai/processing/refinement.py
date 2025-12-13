@@ -10,11 +10,25 @@ from __future__ import annotations
 
 from typing import Tuple, List
 
+import os
 import cv2
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage import median_filter
 
+# --- DEBUG HELPERS ---
+def _swai_debug_on():
+    val = os.getenv("SWAI_DEBUG", "0").lower()
+    return val not in ("0", "false", "off", "")
+
+def _swai_log(tag, payload):
+    if not _swai_debug_on():
+        return
+    try:
+        import json
+        print(f"[SWAI][{tag}] " + json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        print(f"[SWAI][{tag}] {payload}")
 
 # Exception raised when refinement (two-line infill) cannot be completed
 class RefinementError(Exception):
@@ -491,8 +505,8 @@ def refine_sidewalk_mask(
     mask = remove_new_pixels_outside_main_segment_x(mask, reference=keep, max_gap=2, pad_px=2)
     
     #print(f" After two-line infill: {mask.sum()} px positive")
-    #cv2.imwrite("debug_5_twoline.png", (mask * 255).astype(np.uint8))
+    cv2.imwrite("debug_5_twoline.png", (mask * 255).astype(np.uint8))
 
-    #print("[SWAI][refine]", {"pos_px_after_refine": int(mask.sum())})
+    _swai_log("refine", {"pos_px_before_refine": int(keep.sum())})
 
     return mask, (top_line, bot_line)
