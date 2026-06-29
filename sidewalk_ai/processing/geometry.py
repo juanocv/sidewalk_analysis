@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
-import matplotlib.pyplot as plt
 
 import cv2, os
 import numpy as np
@@ -1334,6 +1333,8 @@ def _plot_compute_width_debug(
       - histograma de Δu com limites;
       - resumo textual.
     """
+    import matplotlib.pyplot as plt
+
     H, W = sidewalk_mask.shape
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
 

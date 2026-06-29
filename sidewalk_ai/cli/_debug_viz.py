@@ -5,7 +5,6 @@ import cv2, numpy as np, torch
 from pathlib import Path
 from sidewalk_ai.io.image_io import read_rgb
 from ._builder import LABEL_MAP
-from detectron2.data.catalog import MetadataCatalog
 
 
 def _project_root() -> Path:
@@ -21,6 +20,12 @@ def make_palette():
     lut = rng.integers(0, 255, (256, 3), np.uint8)
     lut[0] = (0, 0, 255)
     return lut
+
+
+def _metadata_catalog():
+    from detectron2.data.catalog import MetadataCatalog
+
+    return MetadataCatalog
 
 
 def _pad_or_crop_height(img: np.ndarray, target_h: int, pad_color: int | tuple = 255) -> np.ndarray:
@@ -199,7 +204,7 @@ def get_segment_info_for_debug(segmenter, img_rgb):
                     seg_map = panoptic_seg.cpu().numpy()
 
                     # Get metadata for class names
-                    metadata = MetadataCatalog.get(base_segmenter.cfg.DATASETS.TRAIN[0])
+                    metadata = _metadata_catalog().get(base_segmenter.cfg.DATASETS.TRAIN[0])
                     segments_info = []
                     for seg in segments_info_raw:
                         seg_id = seg["id"]
@@ -270,7 +275,7 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
     if backend_name == "detectron2":
         try:
             if hasattr(base_segmenter, "cfg"):
-                metadata = MetadataCatalog.get(base_segmenter.cfg.DATASETS.TRAIN[0])
+                metadata = _metadata_catalog().get(base_segmenter.cfg.DATASETS.TRAIN[0])
 
                 # Use divisor logic: category_id * divisor + instance_id
                 divisor = 1000  # Standard Detectron2 divisor

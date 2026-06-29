@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -22,7 +22,6 @@ from sidewalk_ai.processing.geometry import (
 )
 from sidewalk_ai.processing.fusion import logical_fuse
 from sidewalk_ai.models.base import Segmenter
-from sidewalk_ai.models.midas import MidasEstimator
 from sidewalk_ai.log import debug_event, get_logger
 
 logger = get_logger(__name__)
@@ -103,7 +102,7 @@ class SidewalkPipeline:
         self,
         *,
         segmenter: Segmenter,
-        depth: MidasEstimator,
+        depth: Any,
         streetview: StreetViewClient,
         refine: bool = True,
         args=None,

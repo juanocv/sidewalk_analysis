@@ -13,11 +13,10 @@ Examples
                                     --label sidewalk,pavement,path
 """
 
-from flask import json
+import json
 import os
 import sidewalk_ai as sw
 from sidewalk_ai.cli._builder import build_segmenter
-from sidewalk_ai.cli._debug_viz import write_debug_sheet
 from sidewalk_ai.cli._argparse import build_parser
 from sidewalk_ai.models.factory import build_depth
 import numpy as np
@@ -31,6 +30,22 @@ from sidewalk_ai.processing.accessibility import (
 from sidewalk_ai.log import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+
+def _write_debug_sheet(*debug_args, **debug_kwargs):
+    try:
+        from sidewalk_ai.cli._debug_viz import write_debug_sheet
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "an optional debug dependency"
+        raise RuntimeError(
+            "Debug sheet generation requires optional ML/debug dependencies. "
+            "Install the ML extra with `python -m pip install -e \".[ml]\"` and "
+            "install backend-specific packages such as Detectron2 when using "
+            "`--debug` with those visualizations. Missing module: "
+            f"{missing}"
+        ) from exc
+
+    return write_debug_sheet(*debug_args, **debug_kwargs)
 
 initial_time = time.time()
 # ───────────────────────── CLI args ────────────────────────────────
@@ -288,7 +303,7 @@ def _print_tuple_results(obj):
                         # create a synthetic Path so write_debug_sheet can build a filename
                         img_path = Path(f"{side_name}_{i}.png")
                     args.image = img_path
-                    write_debug_sheet(res, pipe, args, segmenter)
+                    _write_debug_sheet(res, pipe, args, segmenter)
                 except Exception as e:
                     print(f"Failed to write debug sheet for {side_name}#{i}: {e}")
                 finally:
@@ -417,7 +432,7 @@ if args.debug:
                 args.image = res.img_path
             else:
                 args.image = Path("singleview.png")
-        write_debug_sheet(res, pipe, args, segmenter)
+        _write_debug_sheet(res, pipe, args, segmenter)
     except Exception as e:
         logger.warning("Failed to write debug sheet: %s", e)
     finally:

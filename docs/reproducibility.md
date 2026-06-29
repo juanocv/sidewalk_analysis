@@ -43,6 +43,13 @@ Generic ML additions:
 python -m pip install -e ".[ml]"
 ```
 
+For a new workstation intended to run the README examples, install both layers in the same
+environment:
+
+```powershell
+python -m pip install -e ".[dev,ml]"
+```
+
 Install backend-specific packages separately when needed:
 
 - PyTorch: install the CPU or CUDA build that matches the machine.

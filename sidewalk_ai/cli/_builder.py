@@ -41,7 +41,7 @@ def build_segmenter(
                 device=device,
             )
         else:
-            base_seg = sw.build_segmenter(backends[0])
+            base_seg = sw.build_segmenter(backends[0], device=device)
     else:
         # Two back-ends, build an ensemble segmenter
         base_seg = EnsembleSegmenter(

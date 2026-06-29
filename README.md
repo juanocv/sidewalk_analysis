@@ -42,11 +42,17 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-For the full ML stack, install the backend-specific packages after the base setup:
+The base install is enough for unit tests and lightweight package imports. The examples in
+the **Running** section load real segmentation/depth models, so install the ML layer before
+running them:
 
 ```powershell
 python -m pip install -e ".[ml]"
 ```
+
+On Windows, install the PyTorch build that matches your CPU/CUDA setup and install
+backend-specific packages such as Detectron2, OneFormer, or ZoeDepth according to their upstream
+instructions when you select those backends.
 
 Copy `.env.example` to `.env` and set `GOOGLE_API_KEY` before running Street View calls.
 The key is required only when the code performs an actual Google API request; importing modules
@@ -62,6 +68,10 @@ Single image:
 ```powershell
 python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg --single-view --device cpu
 ```
+
+This default command uses `--seg oneformer --depth zoe`, which requires the optional ML layer and
+the corresponding model assets. Add `--debug` only after installing debug/backend visualization
+dependencies.
 
 Coordinates:
 

@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 CORE_PACKAGES = [
+    "joblib",
     "numpy",
     "opencv-python",
     "pydantic",
