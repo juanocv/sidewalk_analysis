@@ -2,7 +2,6 @@
 from __future__ import annotations
 from typing import Literal
 import numpy as np
-import cv2
 import torch
 from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
 
@@ -18,11 +17,11 @@ class OneFormerSegmenter(Segmenter):
         model_name: str = "shi-labs/oneformer_ade20k_swin_large",
         *,
         device: str | None = None,
-        fuse_stuff: bool = False,          # funde *apenas* stuff quando True
+        fuse_stuff: bool = False,  # funde *apenas* stuff quando True
         postproc_threshold: float = 0.20,
         mask_threshold: float = 0.50,
         overlap_mask_area_threshold: float = 0.80,
-        seg_task: Literal["panoptic","instance","semantic"] = "panoptic",
+        seg_task: Literal["panoptic", "instance", "semantic"] = "panoptic",
         dual_pass_for_instances: bool = True,  # panoptic p/ calçada + instance p/ obstáculos
     ):
         # 1) inicializações corretas
@@ -47,6 +46,7 @@ class OneFormerSegmenter(Segmenter):
     @torch.inference_mode()
     def segment(self, img_rgb, target_label="sidewalk", *, device=None):
         from PIL import Image
+
         pil = Image.fromarray(img_rgb)
 
         id2lbl = getattr(self.model.config, "id2label", {})
@@ -84,7 +84,7 @@ class OneFormerSegmenter(Segmenter):
             seg_id = int(seg["id"])
             seg_info.append((seg_id, name))
             if _match(name, target_label):
-                sidewalk_raw |= (seg_map == seg_id)
+                sidewalk_raw |= seg_map == seg_id
 
         # guardar para debug_viz
         self.last_segments_info = seg_info_raw
@@ -98,7 +98,7 @@ class OneFormerSegmenter(Segmenter):
             n, lab = cv2.connectedComponents(m, connectivity=8)
             comps = []
             for cid in range(1, n):
-                c = (lab == cid)
+                c = lab == cid
                 if int(c.sum()) >= min_area:
                     comps.append(c)
             return comps
@@ -109,7 +109,7 @@ class OneFormerSegmenter(Segmenter):
         for seg_id, seg_name in seg_info:
             if _match(seg_name, target_label):
                 continue
-            inst_mask = (seg_map == seg_id)
+            inst_mask = seg_map == seg_id
             # sep. por componentes para evitar "duas árvores virarem 1"
             for j, comp in enumerate(_split_components(inst_mask, min_area=30)):
                 # manter apenas se tocar a calçada
@@ -133,7 +133,16 @@ class OneFormerSegmenter(Segmenter):
             ins_info = ins["segments_info"]
 
             # whitelist simples de things que costumam ser obstáculos
-            THINGS_ALLOW = {"pole", "bollard", "trash", "trash bin", "bench", "traffic light", "traffic sign"}
+            THINGS_ALLOW = {
+                "pole",
+                "bollard",
+                "trash",
+                "trash bin",
+                "bench",
+                "traffic light",
+                "traffic sign",
+            }
+
             # deduplicação grosseira por IoU para não duplicar com panóptica
             def _iou(a, b):
                 inter = int((a & b).sum())
@@ -141,15 +150,15 @@ class OneFormerSegmenter(Segmenter):
                 return inter / denom
 
             for seg in ins_info:
-                seg_i  = int(seg["id"])
+                seg_i = int(seg["id"])
                 cls_id = int(seg["label_id"])
-                name   = id2lbl.get(cls_id, str(cls_id)).lower().strip()
+                name = id2lbl.get(cls_id, str(cls_id)).lower().strip()
 
                 # só considerar classes úteis; evite 'fence', 'rail' etc. aqui
                 if name not in THINGS_ALLOW:
                     continue
 
-                mask_i = (ins_map == seg_i)
+                mask_i = ins_map == seg_i
                 # só se tocar a calçada
                 if int((mask_i & sidewalk_raw).sum()) == 0:
                     continue
@@ -170,7 +179,7 @@ class OneFormerSegmenter(Segmenter):
         # ------------------ Passo C: Refinamento ------------------
         mask = shave_above_top_envelope(
             sidewalk_raw.astype(np.uint8),
-            max_above_px=None,        
+            max_above_px=None,
             smooth_kernel=11,
             min_cols=30,
         ).astype(bool)

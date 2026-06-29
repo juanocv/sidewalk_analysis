@@ -6,9 +6,11 @@ import numpy as np
 import re
 import os
 
+
 # ------------------------- helpers públicos -------------------------
 def round_half_up(x: float) -> int:
     return int(np.floor(x + 0.5))
+
 
 def types_summary(res_list):
     """
@@ -56,6 +58,7 @@ def types_summary(res_list):
         }
     return out
 
+
 def corridor_block(acc_side):
     g = acc_side.global_stats
     # g.free_total_m tem as estatísticas do corredor (pool L∪R)
@@ -65,10 +68,12 @@ def corridor_block(acc_side):
         "rating": g.rating,
     }
 
+
 # ------------------------- helpers privados -------------------------
 def _safe_array(vals: Iterable[float]) -> np.ndarray:
     arr = np.array([v for v in vals if v is not None and np.isfinite(v)], dtype=float)
     return arr if arr.size else np.array([], dtype=float)
+
 
 def _iqr_mask(x: np.ndarray) -> np.ndarray:
     if x.size < 4:
@@ -77,6 +82,7 @@ def _iqr_mask(x: np.ndarray) -> np.ndarray:
     iqr = q3 - q1
     lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
     return (x >= lo) & (x <= hi)
+
 
 def _robust_stats(vals: Iterable[float]) -> Dict[str, float]:
     x = _safe_array(vals)
@@ -91,15 +97,19 @@ def _robust_stats(vals: Iterable[float]) -> Dict[str, float]:
         p10=float(np.percentile(xr, 10)),
         p90=float(np.percentile(xr, 90)),
     )
-    
+
+
 _LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
+
 
 def _label_to_type(label: str) -> str:
     # "tree#4:base2" -> "tree"
     m = _LABEL_TYPE_RE.match(label)
     return m.group(1).strip().lower() if m else label.lower()
 
+
 # ------------------------- schemas -------------------------
+
 
 @dataclass(frozen=True)
 class PerTypeMetrics:
@@ -120,15 +130,16 @@ class PerTypeMetrics:
         if drop_none:
             d = {k: v for k, v in d.items() if v is not None}
         return d
-    
+
+
 @dataclass(frozen=True)
 class GlobalMetrics:
     total_obstacles: int
-    free_left_m: Dict[str, float]       # stats globais
+    free_left_m: Dict[str, float]  # stats globais
     free_right_m: Dict[str, float]
     free_total_m: Dict[str, float]
-    meets_ratio: float             # fração de instâncias com total_m >= 1.20
-    rating: str                         # "I"/"II"/"III"
+    meets_ratio: float  # fração de instâncias com total_m >= 1.20
+    rating: str  # "I"/"II"/"III"
     # novo: estatísticas globais de largura dos obstáculos
     obs_width_m: Dict[str, float] | None = None
     # Multi-view only (None em single-view):
@@ -156,7 +167,8 @@ class GlobalMetrics:
         if drop_none:
             d = {k: v for k, v in d.items() if v is not None}
         return d
-    
+
+
 @dataclass(frozen=True)
 class AccessibilityMetrics:
     min_clear_required_m: float
@@ -169,10 +181,13 @@ class AccessibilityMetrics:
             "global_stats": self.global_stats.to_dict(drop_none=drop_none, drop_avgs_if_none=True),
             "per_type": {k: v.to_dict(drop_none=drop_none) for k, v in self.per_type.items()},
         }
+
+
 # ------------------------- core -------------------------
 
 # fator do limiar intermediário (padrão 75% do threshold); pode ser ajustado por ENV
 _MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
+
 
 def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.20) -> str:
     """
@@ -189,8 +204,9 @@ def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.2
         return "II"
     return "I"
 
+
 def compute_single_view_metrics(
-    clearances: Iterable,      # Sequence[ClearanceResult]
+    clearances: Iterable,  # Sequence[ClearanceResult]
     *,
     min_clear_required_m: float = 1.20,
     include_obstacle_width: bool = True,  # mantido p/ compat., mas agora sempre consideramos
@@ -202,16 +218,16 @@ def compute_single_view_metrics(
     by_type: Dict[str, List[Tuple[float | None, float | None, float | None, float | None]]] = {}
     for c in items:
         t = _label_to_type(c.label)
-        L_val = getattr(c, 'L_m', None)
-        R_val = getattr(c, 'R_m', None)
-        total_val = getattr(c, 'total_m', None)
-        obs_w = getattr(c, 'obs_width', None)
+        L_val = getattr(c, "L_m", None)
+        R_val = getattr(c, "R_m", None)
+        total_val = getattr(c, "total_m", None)
+        obs_w = getattr(c, "obs_width", None)
         by_type.setdefault(t, []).append((L_val, R_val, total_val, obs_w))
 
     per_type: Dict[str, PerTypeMetrics] = {}
     all_corridors_all = []
     all_corridors_pos = []
-    all_obsw  = []
+    all_obsw = []
 
     for t, rows in by_type.items():
         # Only consider clearances with a valid total_m for statistical metrics
@@ -221,10 +237,7 @@ def compute_single_view_metrics(
         Rs = [r[1] for r in valid_rows if (r[1] is not None and np.isfinite(r[1]) and r[1] > 0.0)]
         # pool L∪R from valid rows
         corridors = [
-            v
-            for r in valid_rows
-            for v in (r[0], r[1])
-            if (v is not None and np.isfinite(v))
+            v for r in valid_rows for v in (r[0], r[1]) if (v is not None and np.isfinite(v))
         ]
         corridors_pos = [v for v in corridors if v > 0.0]
         Ws = [float(w) for (_, _, _, w) in rows if (w is not None and np.isfinite(w))]
@@ -233,7 +246,7 @@ def compute_single_view_metrics(
             count=len(rows),  # count includes all detected obstacles of this type
             free_left_m=_robust_stats(Ls),
             free_right_m=_robust_stats(Rs),
-            free_total_m=_robust_stats(corridors),   # pool L∪R from valid rows
+            free_total_m=_robust_stats(corridors),  # pool L∪R from valid rows
             obs_width_m=_robust_stats(Ws) if Ws else None,
         )
 
@@ -267,12 +280,19 @@ def compute_single_view_metrics(
             free_right_m=_robust_stats([r[1] for rows in by_type.values() for r in rows]),
             free_total_m=ft_stats,
             meets_ratio=meet_ratio,
-            rating=_rating_rank_by_threshold(ft_stats.get("median", float("nan")), min_clear_required_m),
+            rating=_rating_rank_by_threshold(
+                ft_stats.get("median", float("nan")), min_clear_required_m
+            ),
             obs_width_m=_robust_stats(all_obsw) if all_obsw else None,
         )
     else:
         # sem obstáculos → corredor "cheio" e obs_width_m inexistente
-        nan_stats = {"median": float("nan"), "p10": float("nan"), "p90": float("nan"), "mean": float("nan")}
+        nan_stats = {
+            "median": float("nan"),
+            "p10": float("nan"),
+            "p90": float("nan"),
+            "mean": float("nan"),
+        }
         glob = GlobalMetrics(
             total_obstacles=0,
             free_left_m=_robust_stats([]),
@@ -289,11 +309,13 @@ def compute_single_view_metrics(
         global_stats=glob,
     )
 
+
 def _counts(res_list):
     return [len(getattr(r, "clearances", []) or []) for r in res_list]
-    
+
+
 def compute_multiview_metrics(
-    results_left: Iterable,   # Iterable[Result]
+    results_left: Iterable,  # Iterable[Result]
     results_right: Iterable,  # Iterable[Result]
     *,
     min_clear_required_m: float = 1.20,
@@ -308,6 +330,7 @@ def compute_multiview_metrics(
     largura distorçam as estatísticas de corredor (mediana, desvio,
     meets_ratio, etc.).
     """
+
     def _collect(res_iter: Iterable) -> List:
         cl = []
         for r in res_iter:
@@ -324,15 +347,15 @@ def compute_multiview_metrics(
             cl.extend(getattr(r, "clearances", []) or [])
         return cl
 
-    left_cl  = _collect(results_left)
+    left_cl = _collect(results_left)
     right_cl = _collect(results_right)
-    all_cl   = left_cl + right_cl
+    all_cl = left_cl + right_cl
 
     # primeiro, compute métricas “como hoje”
     out = {
-        "LEFT":  compute_single_view_metrics(left_cl,  min_clear_required_m=min_clear_required_m),
+        "LEFT": compute_single_view_metrics(left_cl, min_clear_required_m=min_clear_required_m),
         "RIGHT": compute_single_view_metrics(right_cl, min_clear_required_m=min_clear_required_m),
-        "ALL":   compute_single_view_metrics(all_cl,   min_clear_required_m=min_clear_required_m),
+        "ALL": compute_single_view_metrics(all_cl, min_clear_required_m=min_clear_required_m),
     }
 
     # LEFT / RIGHT: média por vista daquele lado

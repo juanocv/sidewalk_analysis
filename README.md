@@ -1,75 +1,131 @@
-# Automatic Sidewalk Width Estimation and Obstacle Detection Using Panoptic Segmentation and Depth Estimation on Brazilian Street View Images
+# Sidewalk AI
 
-## Description
-Have you ever thought about why sidewalks, specially in third-world countries, are so deficient
-with little to no walkable space and plenty obstacles on the way?
+Sidewalk AI estimates sidewalk width and obstacle clearance from Google Street View imagery.
+The production package lives in `sidewalk_ai/`; research notebooks, experiments, image samples,
+and third-party model checkouts are kept outside the package boundary.
 
-We have thought about it too. 
+## What It Does
 
-That is the reason the main goal of this project is to use artificial intelligence tools, more specifically
-computer vision models, to segment, detect and calculate the width of sidewalks and potential
-obstacles that might be in a pedestrian's way.
+The pipeline combines:
 
-This project explores and evaluates two advanced computer vision pipelines to automate sidewalk width estimation:
-- Detectron2 + MiDaS (COCO dataset)
-- OneFormer + MiDaS (ADE20k dataset)
+- Street View image acquisition and geocoding.
+- Sidewalk segmentation through Detectron2, OneFormer, DeepLab, or ensemble backends.
+- Monocular depth estimation through MiDaS or ZoeDepth.
+- Mask refinement, width estimation, obstacle extraction, and accessibility metrics.
+- Single-view and multi-view analysis for address or coordinate inputs.
 
-The pipelines leverage panoptic segmentation models and depth estimation models to provide reliable and automated sidewalk measurement solutions.
+## Repository Layout
 
+```text
+sidewalk_ai/              Python package used by the CLI and API
+sidewalk_ai/core/         Pipeline orchestration and shared configuration
+sidewalk_ai/io/           Street View, image, and geospatial I/O
+sidewalk_ai/models/       Model adapters and factories
+sidewalk_ai/processing/   Geometry, fusion, refinement, and accessibility logic
+sidewalk_ai/tests/        Unit tests that avoid network and GPU dependencies
+prototype/                Research/prototype code kept out of the package build
+generic/                  Local datasets, notebooks, and experiment outputs
+```
 
-## Workflow
-TDB
+Large third-party repositories such as Detectron2, OneFormer, ZoeDepth, and DeepLab are treated
+as local external dependencies and are excluded from the Python package build.
 
-## Technical Approach
-### 1. Image Acquisition
-- Images were acquired through Google Street View Static API.
-- Standardized parameters were used, with default Field-of-View (FOV) and fixed intervals for compass heading angles.
-### 2. Sidewalk Segmentation
-- Two approaches were evaluated:
-  - Detectron2: panoptic_fpn_R_101_dconv_cascade_gn_3x (COCO dataset)
-  - OneFormer: shi-labs/oneformer_ade20k_swin_large (ADE20k dataset)
-### 3. Depth Estimation
-- Monocular depth estimation was performed using the MiDaS depth estimation model (DPT_Large).
-### 4. Sidewalk Width Estimation
-- Sidewalk width calculations were made using depth maps combined with segmentation masks. A custom methodology (pixel-to-meter conversion based on assumed camera parameters and MiDaS depth maps) was developed.
-### 5. Obstacle Detection
-- A separate functionality based on segmentation results was developed to identify potential obstacles on sidewalks.
+## Setup
 
-## Installation
-First of all you have to clone this repo via ```git clone https://github.com/juanocv/sidewalk_analysis.git```
+Use Python 3.11 or newer. GPU model stacks may require a stricter Python/PyTorch/CUDA matrix, so
+install those backends according to their upstream documentation.
 
-Secondly, you *must* install [detectron2](https://detectron2.readthedocs.io/en/latest/tutorials/install.html), [OneFormer](https://github.com/SHI-Labs/OneFormer/blob/main/INSTALL.md) and their respective dependencies in the same folder you have cloned this repo.
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
 
-Finally, you are good to go
+For the full ML stack, install the backend-specific packages after the base setup:
 
->For how to install detectron2 on Windows please check [this guide](https://dev.to/reckon762/how-to-install-detectron2-on-windows-3hil)
+```powershell
+python -m pip install -e ".[ml]"
+```
 
-## Examples
-TDB
+Copy `.env.example` to `.env` and set `GOOGLE_API_KEY` before running Street View calls.
+The key is required only when the code performs an actual Google API request; importing modules
+and running unit tests do not require it.
 
-## Results
-Detailed experimental evaluations comparing both pipelines are provided in the notebook and the scripts. Brief conclusions drawn from experiments include:
-- OneFormer + MiDaS consistently produces lower relative error estimations (under 25%, sometimes even under 5%) compared to Detectron2.
-- The optimal sidewalk width estimations depend significantly on the image acquisition angle, with diagonal views providing more accurate measurements.
-- OneFormer demonstrates higher computational demand, approximately double the inference time compared to Detectron2.
-- Challenges remain, especially when sidewalks visually resemble roads, highlighting the need for refined capture methods and additional depth cues.
+For backend-specific Windows/CUDA guidance, diagnostics, and logging setup, see
+[`docs/reproducibility.md`](docs/reproducibility.md).
 
-## Important Notes and Future Work
-- Current estimations assume a fixed camera Field-of-View (FOV); actual measurements could improve significantly with more precise calibration.
-- Increasing the density of compass heading angles (currently at 30° intervals) could further enhance the accuracy and robustness of measurements.
-- Future improvements include multi-view stereo approaches, camera calibration refinement, and integration with GIS databases for better spatial accuracy.
+## Running
+
+Single image:
+
+```powershell
+python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg --single-view --device cpu
+```
+
+Coordinates:
+
+```powershell
+python -m sidewalk_ai.cli.play --lat -23.678479 --lon -46.559621 --multi-view --device cuda
+```
+
+Address:
+
+```powershell
+python -m sidewalk_ai.cli.play "Av. Paulista 1578, Sao Paulo" --multi-view --device cuda
+```
+
+Use `--debug --outdir debug_out` to write diagnostic images.
+
+Runtime diagnostics:
+
+```powershell
+python -m sidewalk_ai.diagnostics
+python -m sidewalk_ai.diagnostics --json
+```
+
+Structured logs:
+
+```powershell
+python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg `
+  --single-view --device cpu --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
+```
+
+## Quality Checks
+
+```powershell
+python -m compileall sidewalk_ai -q
+python -m pytest
+python -m ruff check sidewalk_ai
+python -m black --check sidewalk_ai
+```
+
+Windows helper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```
+
+The default tests are unit-level and should not download models, call Google APIs, or require a GPU.
+Heavy model checks should be added as explicit integration tests with `gpu` or `network` markers.
+
+## Version-Control Hygiene
+
+- Keep generated PNG/PDF/HTML outputs out of commits unless they are intentional documentation assets.
+- Keep secrets in `.env`; commit only `.env.example`.
+- Keep third-party model repositories outside the package build.
+- Prefer focused tests around geometry, request normalization, and pipeline orchestration before
+  changing model adapters or estimation heuristics.
 
 ## Citation
-If you use this repository in your research, please consider citing our work:
-```
-@misc{citation2025,
-  author = {Diego Guerra, Juan Oliveira de Carvalho},
+
+```bibtex
+@misc{sidewalk_ai_2025,
+  author = {Diego Guerra and Juan Oliveira de Carvalho},
   title = {Automatic Sidewalk Width Estimation and Obstacle Detection Using Panoptic Segmentation and Depth Estimation},
   year = {2025},
   publisher = {GitHub},
   journal = {GitHub repository},
-  url = {https://github.com/juanocv/sidewalk-analysis},
+  url = {https://github.com/juanocv/sidewalk-analysis}
 }
 ```
-
-

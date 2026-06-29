@@ -5,24 +5,27 @@ from sidewalk_ai.models.ensemble import EnsembleSegmenter
 
 # hard-coded synonyms per back-end
 LABEL_MAP = {
-    "oneformer":   ["sidewalk", "path"],
-    "detectron2":  ["sidewalk", "pavement", "path", "footpath"],
-    "deeplab":     ["sidewalk"],          # City-scapes trainId 1
+    "oneformer": ["sidewalk", "path"],
+    "detectron2": ["sidewalk", "pavement", "path", "footpath"],
+    "deeplab": ["sidewalk"],  # City-scapes trainId 1
 }
 
-class AliasSegmenter(Segmenter):            
+
+class AliasSegmenter(Segmenter):
     def __init__(self, backend_name: str, base: Segmenter, synonyms: list[str]):
         self.base = base
-        self.syn  = synonyms
+        self.syn = synonyms
         self.backend_name = backend_name
 
     def segment(self, img_rgb, target_label="sidewalk", **kw):
         result = self.base.segment(img_rgb, target_label=self.syn, **kw)
         return result
 
+
 # ───────────────────── Build the base segmenter(s) ──────────────────
-def build_segmenter(seg_flag: str, *, ckpt: str|None,
-                    dl_model: str, device: str, method: str|None) -> Segmenter:
+def build_segmenter(
+    seg_flag: str, *, ckpt: str | None, dl_model: str, device: str, method: str | None
+) -> Segmenter:
     """Build a segmenter based on the given flag and parameters."""
     backends = seg_flag.split("+")
     if len(backends) == 1:
@@ -50,8 +53,4 @@ def build_segmenter(seg_flag: str, *, ckpt: str|None,
         synonyms = list({s for b in backends for s in LABEL_MAP[b]})
 
     # Wrap the base segmenter with an alias segmenter
-    return AliasSegmenter(
-        backend_name=seg_flag,
-        base=base_seg,
-        synonyms=synonyms
-    )   
+    return AliasSegmenter(backend_name=seg_flag, base=base_seg, synonyms=synonyms)

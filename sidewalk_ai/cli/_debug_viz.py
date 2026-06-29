@@ -7,6 +7,7 @@ from sidewalk_ai.io.image_io import read_rgb
 from ._builder import LABEL_MAP
 from detectron2.data.catalog import MetadataCatalog
 
+
 def _project_root() -> Path:
     """Return the repository root (two levels above this file)."""
     try:
@@ -14,9 +15,13 @@ def _project_root() -> Path:
     except Exception:
         return Path.cwd()
 
+
 def make_palette():
     rng = np.random.default_rng(0)
-    lut = rng.integers(0,255,(256,3),np.uint8); lut[0]=(0,0,255); return lut
+    lut = rng.integers(0, 255, (256, 3), np.uint8)
+    lut[0] = (0, 0, 255)
+    return lut
+
 
 def _pad_or_crop_height(img: np.ndarray, target_h: int, pad_color: int | tuple = 255) -> np.ndarray:
     """
@@ -32,10 +37,11 @@ def _pad_or_crop_height(img: np.ndarray, target_h: int, pad_color: int | tuple =
             pad = np.full((target_h - h, w, 3), pad_color, np.uint8)
         else:
             # pad_color é (B,G,R)
-            pad = np.tile(np.array(pad_color, np.uint8).reshape(1,1,3), (target_h - h, w, 1))
+            pad = np.tile(np.array(pad_color, np.uint8).reshape(1, 1, 3), (target_h - h, w, 1))
         return np.vstack([img, pad])
     # h > target_h
     return img[:target_h, :, :]
+
 
 def _match_height(img: np.ndarray, target_h: int) -> np.ndarray:
     """Resize preserving width to match target height for safe hstack."""
@@ -45,8 +51,10 @@ def _match_height(img: np.ndarray, target_h: int) -> np.ndarray:
     interp = cv2.INTER_AREA if h > target_h else cv2.INTER_LINEAR
     return cv2.resize(img, (w, target_h), interpolation=interp)
 
-def _make_depth_legend(vmin: float, vmax: float, height: int, *, label: str,
-                       bar_w: int = 20, right_pad: int = 6) -> np.ndarray:
+
+def _make_depth_legend(
+    vmin: float, vmax: float, height: int, *, label: str, bar_w: int = 20, right_pad: int = 6
+) -> np.ndarray:
     """
     Barra vertical (INFERNO) + coluna de texto, compacta:
       - barra mais fina (bar_w)
@@ -74,25 +82,28 @@ def _make_depth_legend(vmin: float, vmax: float, height: int, *, label: str,
 
     # posições (com folga pequena à esquerda do texto)
     x_text = bar_color.shape[1] + 4
-    top_y  = 14
-    bot_y  = max(16, height - 8)  # garante que o texto inferior não saia da imagem
+    top_y = 14
+    bot_y = max(16, height - 8)  # garante que o texto inferior não saia da imagem
 
-    cv2.putText(legend, vmax_txt, (x_text, top_y), font, fs, (0,0,0), th, cv2.LINE_AA)
-    cv2.putText(legend, vmin_txt, (x_text, bot_y), font, fs, (0,0,0), th, cv2.LINE_AA)
+    cv2.putText(legend, vmax_txt, (x_text, top_y), font, fs, (0, 0, 0), th, cv2.LINE_AA)
+    cv2.putText(legend, vmin_txt, (x_text, bot_y), font, fs, (0, 0, 0), th, cv2.LINE_AA)
 
     return legend
 
+
 def add_title(img, text):
     canvas = img.copy()
-    cv2.putText(canvas, text, (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        canvas, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA
+    )
     return canvas
 
-def overlay_mask(img, mask, color=(0,255,0), alpha=0.4):
+
+def overlay_mask(img, mask, color=(0, 255, 0), alpha=0.4):
     ovl = img.copy()
     ovl[mask] = color
-    return cv2.addWeighted(ovl, alpha, img, 1-alpha, 0)
+    return cv2.addWeighted(ovl, alpha, img, 1 - alpha, 0)
+
 
 def _fmt_num(x, default="N/A", precision=2):
     """Format a numeric value safely: return `default` when x is None or non-finite."""
@@ -106,77 +117,87 @@ def _fmt_num(x, default="N/A", precision=2):
     except Exception:
         return default
 
+
 def get_depth_model_name(depth_estimator):
     """Get the correct depth model name for display"""
-    if hasattr(depth_estimator, '__class__'):
+    if hasattr(depth_estimator, "__class__"):
         class_name = depth_estimator.__class__.__name__
-        if 'Zoe' in class_name or 'ZoeDepth' in class_name:
+        if "Zoe" in class_name or "ZoeDepth" in class_name:
             # Check if it has variant info
-            if hasattr(depth_estimator, 'model') and hasattr(depth_estimator.model, 'core'):
+            if hasattr(depth_estimator, "model") and hasattr(depth_estimator.model, "core"):
                 # Try to get the variant from the model architecture
-                variant = getattr(depth_estimator, '_variant', 'unknown')
-                if variant != 'unknown':
+                variant = getattr(depth_estimator, "_variant", "unknown")
+                if variant != "unknown":
                     return f"ZoeDepth-{variant.upper()}"
                 return "ZoeDepth"
-            elif hasattr(depth_estimator, '_variant'):
+            elif hasattr(depth_estimator, "_variant"):
                 return f"ZoeDepth-{depth_estimator._variant.upper()}"
             return "ZoeDepth"
-        elif 'Midas' in class_name or 'MiDaS' in class_name:
+        elif "Midas" in class_name or "MiDaS" in class_name:
             return "MiDaS"
         else:
             return class_name
     return "Unknown"
 
+
 def get_segment_info_for_debug(segmenter, img_rgb):
     """Get segmentation info for debug visualization - matches original logic"""
     segments_info = []
     seg_map = None
-    
+
     # Handle ensemble case
-    if hasattr(segmenter, 'base') and hasattr(segmenter.base, 'a'):  # ensemble
+    if hasattr(segmenter, "base") and hasattr(segmenter.base, "a"):  # ensemble
         base_segmenter = segmenter.base.a
         backend_name = segmenter.backend_name
     else:
-        base_segmenter = segmenter.base if hasattr(segmenter, 'base') else segmenter
-        backend_name = getattr(segmenter, 'backend_name', 'unknown')
-    
+        base_segmenter = segmenter.base if hasattr(segmenter, "base") else segmenter
+        backend_name = getattr(segmenter, "backend_name", "unknown")
+
     # Run segmentation to get detailed info
     if backend_name == "oneformer":
         try:
-            if hasattr(base_segmenter, 'model') and hasattr(base_segmenter, 'processor'):
-                inputs = base_segmenter.processor(images=img_rgb, task_inputs=["panoptic"], return_tensors="pt")
-                if hasattr(base_segmenter, 'device'):
+            if hasattr(base_segmenter, "model") and hasattr(base_segmenter, "processor"):
+                inputs = base_segmenter.processor(
+                    images=img_rgb, task_inputs=["panoptic"], return_tensors="pt"
+                )
+                if hasattr(base_segmenter, "device"):
                     inputs = {k: v.to(base_segmenter.device) for k, v in inputs.items()}
-                
+
                 with torch.no_grad():
                     outputs = base_segmenter.model(**inputs)
-                
-                result = base_segmenter.processor.post_process_panoptic_segmentation(outputs, target_sizes=[img_rgb.shape[:2]])[0]
+
+                result = base_segmenter.processor.post_process_panoptic_segmentation(
+                    outputs, target_sizes=[img_rgb.shape[:2]]
+                )[0]
                 seg_map = result["segmentation"].cpu().numpy()
                 segments_info_raw = result["segments_info"]
-                
+
                 # Convert to (id, label) format
-                if hasattr(base_segmenter.model, 'config') and hasattr(base_segmenter.model.config, 'id2label'):
+                if hasattr(base_segmenter.model, "config") and hasattr(
+                    base_segmenter.model.config, "id2label"
+                ):
                     id2label = base_segmenter.model.config.id2label
-                    segments_info = [(seg["id"], id2label[seg["label_id"]]) for seg in segments_info_raw]
-                    
+                    segments_info = [
+                        (seg["id"], id2label[seg["label_id"]]) for seg in segments_info_raw
+                    ]
+
                     # Store in segmenter for later use
                     segmenter.last_segments_info = segments_info_raw
                     segmenter.last_seg_map = seg_map
-                        
+
         except Exception as e:
             print(f"Failed to get OneFormer segment info: {e}")
-                
+
     elif backend_name == "detectron2":
         try:
-            if hasattr(base_segmenter, 'predictor'):
+            if hasattr(base_segmenter, "predictor"):
                 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 outputs = base_segmenter.predictor(img_bgr)
-                
+
                 if "panoptic_seg" in outputs:
                     panoptic_seg, segments_info_raw = outputs["panoptic_seg"]
                     seg_map = panoptic_seg.cpu().numpy()
-                    
+
                     # Get metadata for class names
                     metadata = MetadataCatalog.get(base_segmenter.cfg.DATASETS.TRAIN[0])
                     segments_info = []
@@ -184,62 +205,63 @@ def get_segment_info_for_debug(segmenter, img_rgb):
                         seg_id = seg["id"]
                         cat_id = seg["category_id"]
                         isthing = seg.get("isthing", False)
-                        
-                        if isthing and hasattr(metadata, 'thing_classes'):
+
+                        if isthing and hasattr(metadata, "thing_classes"):
                             class_name = metadata.thing_classes[cat_id]
-                        elif hasattr(metadata, 'stuff_classes'):
+                        elif hasattr(metadata, "stuff_classes"):
                             class_name = metadata.stuff_classes[cat_id]
                         else:
                             class_name = f"class_{cat_id}"
-                            
+
                         segments_info.append((seg_id, class_name))
-                    
+
                     # Store in segmenter for later use
                     segmenter.last_segments_info = segments_info_raw
                     segmenter.last_seg_map = seg_map
                     segmenter.metadata = metadata
-                        
+
         except Exception as e:
             print(f"Failed to get Detectron2 segment info: {e}")
-    
+
     return seg_map, segments_info
+
 
 def _label(sid: int, segmenter, seg_info_list=None) -> str:
     """Enhanced label lookup function matching original logic"""
-    
+
     # 1) First try seg_info list if provided
     if seg_info_list:
         seg_id_to_name = {item[0]: item[1] for item in seg_info_list}
         if sid in seg_id_to_name:
             return seg_id_to_name[sid]
-    
+
     # 2) Try stored segments info
-    if hasattr(segmenter, 'last_segments_info'):
+    if hasattr(segmenter, "last_segments_info"):
         for seg in segmenter.last_segments_info:
             if seg["id"] == sid:
                 cat_id = seg["category_id"]
                 isthing = seg.get("isthing", False)
-                if hasattr(segmenter, 'metadata'):
-                    if isthing and hasattr(segmenter.metadata, 'thing_classes'):
+                if hasattr(segmenter, "metadata"):
+                    if isthing and hasattr(segmenter.metadata, "thing_classes"):
                         return segmenter.metadata.thing_classes[cat_id]
-                    elif hasattr(segmenter.metadata, 'stuff_classes'):
+                    elif hasattr(segmenter.metadata, "stuff_classes"):
                         return segmenter.metadata.stuff_classes[cat_id]
-    
+
     # 3) Handle ensemble case - check base segmenter
     base_segmenter = segmenter
-    if hasattr(segmenter, 'base'):
+    if hasattr(segmenter, "base"):
         base_segmenter = segmenter.base
-        if hasattr(base_segmenter, 'a'):  # ensemble
+        if hasattr(base_segmenter, "a"):  # ensemble
             base_segmenter = base_segmenter.a
-    
+
     # Get backend name
-    backend_name = getattr(segmenter, 'backend_name', 'unknown')
+    backend_name = getattr(segmenter, "backend_name", "unknown")
 
     # 4) DeepLab-specific lookup
     if backend_name == "deeplab" or "deeplab" in backend_name:
         try:
             # Check if the base segmenter has id2label mapping
-            if hasattr(base_segmenter, 'id2label') and sid in base_segmenter.id2label:
+            if hasattr(base_segmenter, "id2label") and sid in base_segmenter.id2label:
                 return base_segmenter.id2label[sid]
         except Exception as e:
             print(f"DeepLab lookup error: {e}")
@@ -247,36 +269,36 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
     # 5) Detectron2-specific lookup using divisor logic
     if backend_name == "detectron2":
         try:
-            if hasattr(base_segmenter, 'cfg'):
+            if hasattr(base_segmenter, "cfg"):
                 metadata = MetadataCatalog.get(base_segmenter.cfg.DATASETS.TRAIN[0])
-                
+
                 # Use divisor logic: category_id * divisor + instance_id
                 divisor = 1000  # Standard Detectron2 divisor
                 cat_id = sid // divisor
-                
+
                 # Try stuff classes first, then thing classes
-                if hasattr(metadata, 'stuff_classes') and cat_id < len(metadata.stuff_classes):
+                if hasattr(metadata, "stuff_classes") and cat_id < len(metadata.stuff_classes):
                     return metadata.stuff_classes[cat_id]
-                elif hasattr(metadata, 'thing_classes') and cat_id < len(metadata.thing_classes):
+                elif hasattr(metadata, "thing_classes") and cat_id < len(metadata.thing_classes):
                     return metadata.thing_classes[cat_id]
-                    
+
         except Exception as e:
             print(f"Detectron2 lookup error: {e}")
-    
+
     # 6) OneFormer-specific lookup
     elif backend_name == "oneformer":
         try:
-            if hasattr(base_segmenter, 'model') and hasattr(base_segmenter.model, 'config'):
+            if hasattr(base_segmenter, "model") and hasattr(base_segmenter.model, "config"):
                 config = base_segmenter.model.config
-                if hasattr(config, 'id2label') and sid in config.id2label:
+                if hasattr(config, "id2label") and sid in config.id2label:
                     return config.id2label[sid]
         except Exception as e:
             print(f"OneFormer lookup error: {e}")
-    
+
     # 7) Generic fallback using stored mappings
     ID2LBL = None
     DIV = 1
-    
+
     def _find_id2lbl(obj):
         # Check for DeepLab's id2label first
         if hasattr(obj, "id2label"):
@@ -293,55 +315,65 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
         if hasattr(obj, "model") and hasattr(obj.model, "config"):
             return getattr(obj.model.config, "id2label", None), 1
         return None, 1
-    
+
     ID2LBL, DIV = _find_id2lbl(segmenter)
-    
+
     if ID2LBL:
         # Try divisor-based lookup (Detectron2)
         if DIV > 1:
             cat_id = sid // DIV
             if cat_id in ID2LBL:
                 return ID2LBL[cat_id]
-        
+
         # Try direct lookup (OneFormer and DeepLab)
         if sid in ID2LBL:
             return ID2LBL[sid]
-    
+
     # 7) Final fallback
     return f"id_{sid}"
-    
+
+
 def write_debug_sheet(res, pipeline, args, segmenter):
-    outdir: Path = args.outdir; outdir.mkdir(exist_ok=True, parents=True)
+    outdir: Path = args.outdir
+    outdir.mkdir(exist_ok=True, parents=True)
     debug_mode = bool(getattr(args, "debug", False))
     project_root = _project_root()
     # Prefer the image stored inside the Result (if available). Fallback to
     # res.img_path (load from disk) and finally pipeline._last_rgb.
-    img_rgb = getattr(res, 'rgb_image', None)
-    img_path_used = getattr(res, 'img_path', None)
+    img_rgb = getattr(res, "rgb_image", None)
+    img_path_used = getattr(res, "img_path", None)
     if img_rgb is None and img_path_used is not None:
         try:
             img_rgb = read_rgb(img_path_used)
         except Exception:
             img_rgb = None
     if img_rgb is None:
-        img_rgb = getattr(pipeline, '_last_rgb', None)
+        img_rgb = getattr(pipeline, "_last_rgb", None)
     if img_rgb is None:
         raise RuntimeError("No RGB image available to build debug sheet")
-    img_bgr      = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    img_label = getattr(img_path_used, 'name', None) or getattr(getattr(args, 'image', None), 'name', None) or "image"
-    stem = getattr(img_path_used, 'stem', None) or getattr(getattr(args, 'image', None), 'stem', None) or img_label.replace('.', '_')
-    h, w         = img_bgr.shape[:2]
-    tiles        = []
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    img_label = (
+        getattr(img_path_used, "name", None)
+        or getattr(getattr(args, "image", None), "name", None)
+        or "image"
+    )
+    stem = (
+        getattr(img_path_used, "stem", None)
+        or getattr(getattr(args, "image", None), "stem", None)
+        or img_label.replace(".", "_")
+    )
+    h, w = img_bgr.shape[:2]
+    tiles = []
     panoptic_tile_for_save = None
 
     # 1 panoptic overlay + legend
     is_ensemble = "+" in args.seg
-    
+
     # Prefer segmentation info already computed by the pipeline (attached
     # to the Result). Only recompute segmentation for debug if the Result
     # doesn't contain a panoptic map.
-    seg_map_to_use = getattr(res, 'seg_map', None)
-    segments_info_to_use = getattr(res, 'seg_info', None) or []
+    seg_map_to_use = getattr(res, "seg_map", None)
+    segments_info_to_use = getattr(res, "seg_info", None) or []
     if seg_map_to_use is None:
         try:
             seg_map_debug, segments_info_debug = get_segment_info_for_debug(segmenter, img_rgb)
@@ -351,7 +383,7 @@ def write_debug_sheet(res, pipeline, args, segmenter):
         except Exception:
             # fall back to whatever the Result contains (likely None)
             pass
-    
+
     if seg_map_to_use is not None:
         seg = seg_map_to_use
         # Ensure seg map matches image size. If not, resize with nearest
@@ -359,46 +391,69 @@ def write_debug_sheet(res, pipeline, args, segmenter):
         if seg.shape != img_rgb.shape[:2]:
             try:
                 print(f"[debug_viz] resizing seg_map {seg.shape} -> {img_rgb.shape[:2]}")
-                seg = cv2.resize(seg.astype(np.int32), (img_rgb.shape[1], img_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+                seg = cv2.resize(
+                    seg.astype(np.int32),
+                    (img_rgb.shape[1], img_rgb.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
             except Exception:
                 # fallback: attempt to use original seg (may misalign)
                 pass
-        uniq = np.unique(seg); lut = make_palette()
-        overlay = cv2.addWeighted(img_bgr,.35,lut[seg%256],.65,0)
-        legend  = np.full((len(uniq)*22+10,200,3),255,np.uint8)  # Increased width for longer labels
+        uniq = np.unique(seg)
+        lut = make_palette()
+        overlay = cv2.addWeighted(img_bgr, 0.35, lut[seg % 256], 0.65, 0)
+        legend = np.full(
+            (len(uniq) * 22 + 10, 200, 3), 255, np.uint8
+        )  # Increased width for longer labels
 
-        for i,sid in enumerate(uniq):
+        for i, sid in enumerate(uniq):
             label_name = _label(int(sid), segmenter, segments_info_to_use)
             label_text = label_name
             color = lut[int(sid) % 256].tolist()
-            cv2.rectangle(legend, (5, i*22+5), (25, i*22+20), color, -1)
+            cv2.rectangle(legend, (5, i * 22 + 5), (25, i * 22 + 20), color, -1)
             cv2.putText(
                 legend,
                 label_text[:20],
-                (30, i*22+18),  # Increased max length
+                (30, i * 22 + 18),  # Increased max length
                 cv2.FONT_HERSHEY_SIMPLEX,
-                .5,
+                0.5,
                 (0, 0, 0),
                 1,
             )
         # >>> NOVO: desenhar rótulos de obstáculos (tree#1, pole#ins7:0, etc.)
         obs_for_viz = None  # disable obstacle-base overlay on debug view
         if obs_for_viz:
-            for (olabel, omask) in obs_for_viz:
+            for olabel, omask in obs_for_viz:
                 m = omask.astype(bool)
                 if not m.any():
                     continue
                 ys, xs = np.nonzero(m)
                 cy, cx = int(np.mean(ys)), int(np.mean(xs))
                 # contorno fino para destacar o obstáculo
-                cont_img = (m.astype(np.uint8) * 255)
+                cont_img = m.astype(np.uint8) * 255
                 cnts, _ = cv2.findContours(cont_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 cv2.drawContours(overlay, cnts, -1, (255, 255, 255), 1, lineType=cv2.LINE_AA)
                 # rótulo com pequena sombra para legibilidade
-                cv2.putText(overlay, olabel, (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3, cv2.LINE_AA)
-                cv2.putText(overlay, olabel, (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                cv2.putText(
+                    overlay,
+                    olabel,
+                    (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 0),
+                    3,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    overlay,
+                    olabel,
+                    (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         # normaliza a altura da legenda para combinar com a imagem SEM redimensionar (sem compressão)
         legend = _pad_or_crop_height(legend, h)  # onde h é a altura do overlay/img_bgr
@@ -410,7 +465,11 @@ def write_debug_sheet(res, pipeline, args, segmenter):
 
     # 2 apply refined overlay / masks / ensemble
     if is_ensemble:
-        if hasattr(segmenter, 'base') and hasattr(segmenter.base, 'a') and hasattr(segmenter.base, 'b'):
+        if (
+            hasattr(segmenter, "base")
+            and hasattr(segmenter.base, "a")
+            and hasattr(segmenter.base, "b")
+        ):
             backend_names = segmenter.backend_name.split("+")
             target_a = LABEL_MAP.get(backend_names[0], ["sidewalk"])
             target_b = LABEL_MAP.get(backend_names[1], ["sidewalk"])
@@ -435,19 +494,40 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             # Now append in the desired order:
             # 1. Mask A, 2. Mask B, 3. Ensemble mask, 4. Refined mask, 5. Depth
             tiles = mask_tiles  # Mask A, Mask B, Ensemble mask
-            tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
+            tiles.append(
+                add_title(
+                    overlay_mask(img_bgr, res.refined_mask.astype(bool)),
+                    "Sidewalk (refined mask overlay)",
+                )
+            )
         else:
             # Fallback if ensemble structure is different
-            tiles.append(add_title(cv2.cvtColor(res.refined_mask.astype(np.uint8)*255,
-                                                cv2.COLOR_GRAY2BGR),
-                                "Sidewalk (refined mask only)"))
-            tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
+            tiles.append(
+                add_title(
+                    cv2.cvtColor(res.refined_mask.astype(np.uint8) * 255, cv2.COLOR_GRAY2BGR),
+                    "Sidewalk (refined mask only)",
+                )
+            )
+            tiles.append(
+                add_title(
+                    overlay_mask(img_bgr, res.refined_mask.astype(bool)),
+                    "Sidewalk (refined mask overlay)",
+                )
+            )
     else:
         # Non-ensemble: keep original order
-        tiles.append(add_title(overlay_mask(img_bgr, res.refined_mask.astype(bool)), "Sidewalk (refined mask overlay)"))
-        tiles.append(add_title(cv2.cvtColor(res.refined_mask.astype(np.uint8)*255,
-                                            cv2.COLOR_GRAY2BGR),
-                            "Sidewalk (refined mask only)"))
+        tiles.append(
+            add_title(
+                overlay_mask(img_bgr, res.refined_mask.astype(bool)),
+                "Sidewalk (refined mask overlay)",
+            )
+        )
+        tiles.append(
+            add_title(
+                cv2.cvtColor(res.refined_mask.astype(np.uint8) * 255, cv2.COLOR_GRAY2BGR),
+                "Sidewalk (refined mask only)",
+            )
+        )
 
     # 3 depth - com legenda de escala (sem cabeçalho interno na legenda)
     if hasattr(pipeline, "_predict_depth_without_logo"):
@@ -503,21 +583,19 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     # grid + header/footer
     tile_h, tile_w = tiles[0].shape[:2]
     cols = 3
-    grid = np.zeros((tile_h * ((len(tiles)+cols-1)//cols),
-                    tile_w * cols, 3), np.uint8)
+    grid = np.zeros((tile_h * ((len(tiles) + cols - 1) // cols), tile_w * cols, 3), np.uint8)
 
     for i, t in enumerate(tiles):
         r, c = divmod(i, cols)
         h, w = t.shape[:2]
-        grid[r*tile_h:r*tile_h+h, c*tile_w:c*tile_w+w] = t
+        grid[r * tile_h : r * tile_h + h, c * tile_w : c * tile_w + w] = t
 
     # ---------- HEADER ------------------------------------------------
     hdr_h = 40
     header = np.full((hdr_h, grid.shape[1], 3), 30, np.uint8)
     text = f"{img_label}   |   seg={args.seg}   |   depth={depth_model_name}"
-    cv2.putText(header, text, (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-    
+    cv2.putText(header, text, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
     # ---------- FOOTER ------------------------------------------------
     ftr_h = 30
     footer = np.full((ftr_h, grid.shape[1], 3), 30, np.uint8)
@@ -526,23 +604,23 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     if res.clearances:
         parts = []
         for c in res.clearances:
-            obs_w = getattr(c, 'obs_width', None)
+            obs_w = getattr(c, "obs_width", None)
             parts.append(f"{c.label}:{_fmt_num(obs_w)}m")
         clear = ", ".join(parts) if parts else "no obstacles"
 
-    w_obj = getattr(res, 'width', None)
-    w_m = getattr(w_obj, 'width_m', None) if w_obj is not None else None
-    w_margin = getattr(w_obj, 'margin_m', None) if w_obj is not None else None
+    w_obj = getattr(res, "width", None)
+    w_m = getattr(w_obj, "width_m", None) if w_obj is not None else None
+    w_margin = getattr(w_obj, "margin_m", None) if w_obj is not None else None
     txt2 = f"width = {_fmt_num(w_m)} +/- {_fmt_num(w_margin)} m   |   clearance: {clear}"
-    cv2.putText(footer, txt2, (10, 22),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+    cv2.putText(footer, txt2, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
     # ---------- COMPOSE ----------------------------------------------
     composite = np.vstack([header, grid, footer])
 
     fname = f"{base_name}.png"
     cv2.imwrite(str(outdir / fname), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
-    
+
+
 def plot_clearance_overlay_debug(
     image: np.ndarray,
     top: Tuple[float, float],
@@ -553,7 +631,7 @@ def plot_clearance_overlay_debug(
     base_candidate_masks: Optional[Sequence[np.ndarray]] = None,
     BASE_BAND_PIXELS: int = 1,
     assume_rgb: bool = True,
-    figsize=(12,8)
+    figsize=(12, 8),
 ):
     """
     More advanced overlay for debugging:
@@ -573,13 +651,13 @@ def plot_clearance_overlay_debug(
 
     # draw curb lines (image-space)
     def draw_line_image(m, b, color, thickness=2):
-        x0, x1 = 0, W-1
+        x0, x1 = 0, W - 1
         y0 = int(round(m * x0 + b))
         y1 = int(round(m * x1 + b))
         cv2.line(draw_img, (x0, y0), (x1, y1), color, thickness, lineType=cv2.LINE_AA)
 
-    draw_line_image(top[0], top[1], (0,0,255), 2)   # red
-    draw_line_image(bot[0], bot[1], (0,255,0), 2)   # green
+    draw_line_image(top[0], top[1], (0, 0, 255), 2)  # red
+    draw_line_image(bot[0], bot[1], (0, 255, 0), 2)  # green
 
     for idx, ((label, omask), res) in enumerate(zip(obstacles, clearance_results)):
         om = omask.astype(bool)
@@ -587,9 +665,11 @@ def plot_clearance_overlay_debug(
             continue
 
         # shade obstacle
-        blue = np.array([255,0,0], dtype=np.uint8)  # BGR
+        blue = np.array([255, 0, 0], dtype=np.uint8)  # BGR
         alpha = 0.45
-        draw_img[om] = (draw_img[om].astype(np.float32)*(1-alpha) + blue.astype(np.float32)*alpha).astype(np.uint8)
+        draw_img[om] = (
+            draw_img[om].astype(np.float32) * (1 - alpha) + blue.astype(np.float32) * alpha
+        ).astype(np.uint8)
 
         # get or compute candidate mask
         if base_candidate_masks is not None:
@@ -611,13 +691,13 @@ def plot_clearance_overlay_debug(
                     ys, xs = np.nonzero(om)
                     vmax = int(np.max(ys))
                     band_threshold = max(0, vmax - BASE_BAND_PIXELS + 1)
-                    band_mask = (ys >= band_threshold)
+                    band_mask = ys >= band_threshold
                     cand_mask[ys[band_mask], xs[band_mask]] = True
             else:
                 ys, xs = np.nonzero(om)
                 vmax = int(np.max(ys))
                 band_threshold = max(0, vmax - BASE_BAND_PIXELS + 1)
-                band_mask = (ys >= band_threshold)
+                band_mask = ys >= band_threshold
                 cand_mask[ys[band_mask], xs[band_mask]] = True
 
         # optional: compute components and draw outlines for each component
@@ -625,48 +705,57 @@ def plot_clearance_overlay_debug(
             # find components
             num, comp = cv2.connectedComponents(cand_mask.astype(np.uint8))
             for cidx in range(1, num):
-                comp_mask = (comp == cidx)
+                comp_mask = comp == cidx
                 # fill with semi-transparent magenta
-                mag = np.array([255,0,255], dtype=np.uint8)
+                mag = np.array([255, 0, 255], dtype=np.uint8)
                 beta = 0.65
-                draw_img[comp_mask] = (draw_img[comp_mask].astype(np.float32)*(1-beta) + mag.astype(np.float32)*beta).astype(np.uint8)
+                draw_img[comp_mask] = (
+                    draw_img[comp_mask].astype(np.float32) * (1 - beta)
+                    + mag.astype(np.float32) * beta
+                ).astype(np.uint8)
                 # draw contour outline
                 # contours expect uint8 uint8 image
-                cont_img = (comp_mask.astype(np.uint8)*255)
+                cont_img = comp_mask.astype(np.uint8) * 255
                 cnts, _ = cv2.findContours(cont_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                cv2.drawContours(draw_img, cnts, -1, (255,255,255), 1, lineType=cv2.LINE_AA)
+                cv2.drawContours(draw_img, cnts, -1, (255, 255, 255), 1, lineType=cv2.LINE_AA)
 
         # draw chosen pixels
-        if hasattr(res, 'L_pixel') and res.L_pixel is not None:
+        if hasattr(res, "L_pixel") and res.L_pixel is not None:
             xL, yL = int(res.L_pixel[0]), int(res.L_pixel[1])
-            cv2.circle(draw_img, (xL, yL), 3, (0,255,255), -1, lineType=cv2.LINE_AA)  # yellow
-            cv2.circle(draw_img, (xL, yL), 3, (255,255,255), 1, lineType=cv2.LINE_AA)
+            cv2.circle(draw_img, (xL, yL), 3, (0, 255, 255), -1, lineType=cv2.LINE_AA)  # yellow
+            cv2.circle(draw_img, (xL, yL), 3, (255, 255, 255), 1, lineType=cv2.LINE_AA)
 
             # compute perpendicular projection point on image curb line (top and bot are image-space)
             # pick the line that corresponds to 'left' depending on L_pixel being result of top/bot
             # we will draw perpendiculars to both curbs for clarity
-            for m,b,color in ((top[0], top[1], (255,255,255)), (bot[0], bot[1], (200,200,200))):
+            for m, b, color in (
+                (top[0], top[1], (255, 255, 255)),
+                (bot[0], bot[1], (200, 200, 200)),
+            ):
                 # project (xL,yL) to nearest point on image line y = m*x + b:
                 if abs(m) < 1e-9:
                     # horizontal line; clamp x to xL
                     xproj = xL
                 else:
-                    xproj = (xL + m*(yL - b)) / (1 + m*m)
+                    xproj = (xL + m * (yL - b)) / (1 + m * m)
                 yproj = int(round(m * xproj + b))
                 xproj = int(round(xproj))
                 # draw small line
                 cv2.line(draw_img, (xL, yL), (xproj, yproj), color, 2, lineType=cv2.LINE_AA)
 
-        if hasattr(res, 'R_pixel') and res.R_pixel is not None:
+        if hasattr(res, "R_pixel") and res.R_pixel is not None:
             xR, yR = int(res.R_pixel[0]), int(res.R_pixel[1])
-            cv2.circle(draw_img, (xR, yR), 3, (255,255,0), -1, lineType=cv2.LINE_AA)  # cyan
-            cv2.circle(draw_img, (xR, yR), 3, (255,255,255), 1, lineType=cv2.LINE_AA)
+            cv2.circle(draw_img, (xR, yR), 3, (255, 255, 0), -1, lineType=cv2.LINE_AA)  # cyan
+            cv2.circle(draw_img, (xR, yR), 3, (255, 255, 255), 1, lineType=cv2.LINE_AA)
 
-            for m,b,color in ((top[0], top[1], (255,255,255)), (bot[0], bot[1], (200,200,200))):
+            for m, b, color in (
+                (top[0], top[1], (255, 255, 255)),
+                (bot[0], bot[1], (200, 200, 200)),
+            ):
                 if abs(m) < 1e-9:
                     xproj = xR
                 else:
-                    xproj = (xR + m*(yR - b)) / (1 + m*m)
+                    xproj = (xR + m * (yR - b)) / (1 + m * m)
                 yproj = int(round(m * xproj + b))
                 xproj = int(round(xproj))
                 cv2.line(draw_img, (xR, yR), (xproj, yproj), color, 2, lineType=cv2.LINE_AA)
@@ -678,7 +767,16 @@ def plot_clearance_overlay_debug(
         Rs = f"{getattr(res, 'R_m', 0.0):.2f}"
         text = f"{label}: L={Ls}m R={Rs}m"
         text_pos = (max(0, cx - 40), max(0, cy - 10))
-        cv2.putText(draw_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, lineType=cv2.LINE_AA)
+        cv2.putText(
+            draw_img,
+            text,
+            text_pos,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            lineType=cv2.LINE_AA,
+        )
 
     # convert back to RGB for display
     if assume_rgb:
@@ -688,6 +786,6 @@ def plot_clearance_overlay_debug(
 
     plt.figure(figsize=figsize)
     plt.imshow(disp)
-    plt.axis('off')
+    plt.axis("off")
     plt.show()
     return disp

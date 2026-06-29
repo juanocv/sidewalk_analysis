@@ -9,6 +9,10 @@ import torch
 from PIL import Image
 from torchvision import transforms as T
 
+from sidewalk_ai.log import get_logger
+
+logger = get_logger(__name__)
+
 
 class MidasEstimator:
     """
@@ -16,11 +20,11 @@ class MidasEstimator:
     ``DepthEstimator`` protocol declared in ``sidewalk_ai/models/base.py``.
     A single instance keeps the weights on GPU for the whole lifetime
     of your process (FastAPI / CLI), so inference is *much* faster than
-    loading MiDaS every call as the old implementation did. :contentReference[oaicite:0]{index=0}
+    loading MiDaS every call as the old implementation did.
     """
 
     _HUB_REPO = "intel-isl/MiDaS"
-    _DEFAULT_MODEL = "DPT_Large"
+    _DEFAULT_MODEL = "DPT_BEiT_L_512"
 
     def __init__(
         self,
@@ -28,29 +32,28 @@ class MidasEstimator:
         device: str = "cuda",
         trust_repo: bool = True,
     ) -> None:
-        self.device = (
-            torch.device(device) if torch.cuda.is_available() else torch.device("cpu")
-        )
+        self.device = torch.device(device) if torch.cuda.is_available() else torch.device("cpu")
         self.model_name = model_name or self._DEFAULT_MODEL
 
+        logger.info("Loading MiDaS model '%s' on device '%s'", self.model_name, self.device)
         # ↓ torch already caches the weights under ~/.cache/torch/hub
-        self._model = torch.hub.load(
-            self._HUB_REPO, self.model_name, trust_repo=trust_repo
-        ).to(self.device)
+        self._model = torch.hub.load(self._HUB_REPO, self.model_name, trust_repo=trust_repo).to(
+            self.device
+        )
+        logger.info("Loaded MiDaS model '%s'", self.model_name)
         self._model.eval()
+        logger.info("MiDaS model moved to device '%s'", self.device)
 
         # Fixed Imagenet stats expected by all MiDaS variants
         self._pre = T.Compose(
             [
                 T.ToTensor(),
-                T.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
-        
+
         # depth values are *relative* → we must still fit a scale afterwards
-        is_metric = False
+        self.is_metric = False
 
     # --------------------------------------------------------------------- #
     # public API required by the DepthEstimator Protocol

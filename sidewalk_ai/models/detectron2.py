@@ -40,7 +40,7 @@ class Detectron2Segmenter(Segmenter):
         outs = self.predictor(img_rgb)
         seg_map, seg_info_raw = outs["panoptic_seg"]
         seg_map = seg_map.cpu().numpy()
-    
+
         # ▸ 1) RAW sidewalk mask
         seg_info: list[SegmentInfo] = []
         sidewalk_raw = np.zeros_like(seg_map, dtype=bool)
@@ -49,9 +49,7 @@ class Detectron2Segmenter(Segmenter):
             cat_id = seg["category_id"]
             is_thing = seg["isthing"]
             name = (
-                self._meta.thing_classes[cat_id]
-                if is_thing
-                else self._meta.stuff_classes[cat_id]
+                self._meta.thing_classes[cat_id] if is_thing else self._meta.stuff_classes[cat_id]
             )
 
             seg_info.append((int(seg["id"]), name))
@@ -61,13 +59,13 @@ class Detectron2Segmenter(Segmenter):
         # ▸ 2) Simple refinement (shave above top envelope (remove overhanging patches, etc))
         mask = shave_above_top_envelope(
             sidewalk_raw.astype(np.uint8),
-            max_above_px=None,        # adaptative (~8% thickness)
+            max_above_px=None,  # adaptative (~8% thickness)
             smooth_kernel=11,
             min_cols=30,
         ).astype(bool)
-        
+
         return mask, seg_map, seg_info
-    
+
     # ------------------------------------------------------------------ #
     # Convenience ctor – mirrors old  initialize_model(model_path)
     # ------------------------------------------------------------------ #
@@ -84,8 +82,9 @@ class Detectron2Segmenter(Segmenter):
         exactly like the legacy `initialize_model()` helper did.
         """
         from detectron2 import model_zoo
+
         cfg_file = model_zoo.get_config_file(cfg_name)
-        weights  = model_zoo.get_checkpoint_url(cfg_name)
+        weights = model_zoo.get_checkpoint_url(cfg_name)
 
         return cls(
             config_yml=cfg_file,

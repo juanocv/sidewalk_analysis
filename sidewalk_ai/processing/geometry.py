@@ -2,49 +2,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 
 import cv2, os
 import numpy as np
 
-# --- DEBUG HELPERS ---
-def _swai_debug_on():
-    val = os.getenv("SWAI_DEBUG", "0").lower()
-    return val not in ("0", "false", "off", "")
+from sidewalk_ai.log import debug_enabled, debug_event, get_logger
+
+logger = get_logger(__name__)
+
 
 def _swai_log(tag, payload):
-    if not _swai_debug_on():
-        return
-    try:
-        import json
-        print(f"[SWAI][{tag}] " + json.dumps(payload, ensure_ascii=False, default=str))
-    except Exception:
-        print(f"[SWAI][{tag}] {payload}")
+    if debug_enabled():
+        debug_event(logger, tag, payload)
+
 
 # ------------------ Camera and image parameters ------------------ #
-ORIG_SIZE = (600, 400)      # Street-View static API
-CROP_BOTTOM = 0            # logo strip that we remove
+ORIG_SIZE = (600, 400)  # Street-View static API
+CROP_BOTTOM = 0  # logo strip that we remove
 CAM_HEIGHT_M = 1.75
 
 # --------------------------------------------------------------------------- #
 # 0) Typed results – easy to validate/serialize
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(slots=True, frozen=True)
 class WidthResult:
-    width_m: float           # best estimate
-    margin_m: float          # ± error band (25 % default)
-    n_pixels: int            # inlier count used in the fit
+    width_m: float  # best estimate
+    margin_m: float  # ± error band (25 % default)
+    n_pixels: int  # inlier count used in the fit
 
 
 @dataclass(slots=True, frozen=True)
 class ClearanceResult:
     label: str
-    L_m: float               # free space on the left  of the obstacle
-    R_m: float               # free space on the right
-    total_m: float           # L+R+obstacle width
+    L_m: float  # free space on the left  of the obstacle
+    R_m: float  # free space on the right
+    total_m: float  # L+R+obstacle width
     obs_width: float | None = None  # width of the obstacle in meters
     L_pixel: Optional[tuple[int, int]] = None  # (x, y)
     R_pixel: Optional[tuple[int, int]] = None
@@ -54,12 +50,13 @@ class ClearanceResult:
 # 1)  Core helpers -- largely ported from the research prototype
 # --------------------------------------------------------------------------- #
 
+
 def project_line_to_ground(m, b, fx, fy, cx, cy, pitch_deg=0.0):
     """
     Converte y = m·x + b  (px) para   Z = a·X + c  (m) no plano do solo.
     """
     # Gere ~50 pontos ao longo da linha na imagem
-    xs = np.linspace(0, ORIG_SIZE[0]-1, 50)
+    xs = np.linspace(0, ORIG_SIZE[0] - 1, 50)
     ys = m * xs + b
     X, Z = _ground_intersection(xs, ys, fx, fy, cx, cy, pitch_deg)
     good = np.isfinite(X) & np.isfinite(Z)
@@ -67,22 +64,29 @@ def project_line_to_ground(m, b, fx, fy, cx, cy, pitch_deg=0.0):
         raise RuntimeError("curb line proj. failed")
     # Ajuste Z = a·X + c em coordenadas do solo
     a, c = np.polyfit(X[good], Z[good], 1)
-    return a, c            # forma   Z = a·X + c
+    return a, c  # forma   Z = a·X + c
 
 
 def _scale_from_ground(
-    sidewalk, depth, fx, fy, cx, cy,
-    H_cam=CAM_HEIGHT_M, rows_from_bottom=20,
-    RANSAC_N=10_000, min_inliers=200
+    sidewalk,
+    depth,
+    fx,
+    fy,
+    cx,
+    cy,
+    H_cam=CAM_HEIGHT_M,
+    rows_from_bottom=20,
+    RANSAC_N=10_000,
+    min_inliers=200,
 ) -> float:
     """α robusto ─ usa só as últimas `rows_from_bottom` linhas da calçada."""
     H, _ = sidewalk.shape
     band = np.arange(max(0, H - rows_from_bottom), H)
     ys, xs = np.where(sidewalk[band])
     if xs.size < min_inliers:
-        return 1.0                                   # deixa passar em branco
+        return 1.0  # deixa passar em branco
 
-    ys = ys + band[0]                               # re-alinha índice
+    ys = ys + band[0]  # re-alinha índice
     rng = np.random.default_rng(0)
     sel = rng.choice(xs.size, size=min(RANSAC_N, xs.size), replace=False)
     u, v = xs[sel], ys[sel]
@@ -90,25 +94,29 @@ def _scale_from_ground(
 
     Xr = (u - cx) * Zr / fx
     Yr = (v - cy) * Zr / fy
-    P  = np.column_stack([Xr, Yr, Zr])
+    P = np.column_stack([Xr, Yr, Zr])
 
     # threshold = 2·MAD
     mad = 1.4826 * np.median(np.abs(Zr - np.median(Zr)))
     eps = 2.0 * max(mad, 0.01)
 
     best_cnt = 0
-    best_d   = 1.0
+    best_d = 1.0
     for _ in range(2000):
         a, b, c = P[rng.choice(P.shape[0], 3, replace=False)]
-        n = np.cross(b - a, c - a); n_norm = np.linalg.norm(n)
-        if n_norm < 1e-6: continue
-        n /= n_norm; d = -np.dot(n, a)
+        n = np.cross(b - a, c - a)
+        n_norm = np.linalg.norm(n)
+        if n_norm < 1e-6:
+            continue
+        n /= n_norm
+        d = -np.dot(n, a)
         cnt = np.count_nonzero(np.abs(P @ n + d) < eps)
         if cnt > best_cnt:
             best_cnt, best_d = cnt, d
-            if cnt > 0.15 * P.shape[0]: break
+            if cnt > 0.15 * P.shape[0]:
+                break
 
-    if best_cnt < min_inliers:                       # falhou → neutro
+    if best_cnt < min_inliers:  # falhou → neutro
         return 1.0
     return abs(H_cam / best_d)
 
@@ -132,8 +140,7 @@ def _largest_dense_cluster(
     return np.array(max(clusters, key=len))
 
 
-def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0,
-                         H_cam=CAM_HEIGHT_M):
+def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0, H_cam=CAM_HEIGHT_M):
     """
     Vectorised ray–plane intersection for pixels below the horizon.
     """
@@ -148,7 +155,9 @@ def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0,
     return X, Z
 
 
-def _intrinsics_after_crop(W: int = 600, fov_deg: float = 90.0) -> tuple[float, float, float, float]:
+def _intrinsics_after_crop(
+    W: int = 600, fov_deg: float = 90.0
+) -> tuple[float, float, float, float]:
     """
     Returns fx, fy, cx, cy *in cropped coordinates* but referenced to the
     original optical centre (cy = 200 px).
@@ -156,15 +165,17 @@ def _intrinsics_after_crop(W: int = 600, fov_deg: float = 90.0) -> tuple[float, 
     fx = W / (2 * np.tan(np.radians(fov_deg / 2)))
     fy = fx
     cx = W / 2
-    cy_orig = ORIG_SIZE[1] / 2                      # 200.0
-    cy = cy_orig                                   # same row survives the crop
+    cy_orig = ORIG_SIZE[1] / 2  # 200.0
+    cy = cy_orig  # same row survives the crop
     return fx, fy, cx, cy
 
 
-def _has_two_curbs(mask: np.ndarray,
-                   min_gap_px: int = 50,
-                   min_frac_rows: float = 0.3,
-                   band: tuple[float, float] = (0.3, 0.9)) -> bool:
+def _has_two_curbs(
+    mask: np.ndarray,
+    min_gap_px: int = 50,
+    min_frac_rows: float = 0.3,
+    band: tuple[float, float] = (0.3, 0.9),
+) -> bool:
     H, W = mask.shape
     y0 = int(H * band[0])
     y1 = int(H * band[1])
@@ -182,7 +193,7 @@ def _has_two_curbs(mask: np.ndarray,
         diffs = np.diff(xs)
         j = int(np.argmax(diffs))
         if diffs[j] > min_gap_px:
-            gap_mids.append(0.5 * (xs[j] + xs[j+1]))
+            gap_mids.append(0.5 * (xs[j] + xs[j + 1]))
 
     if not gap_mids:
         return False
@@ -194,7 +205,7 @@ def _has_two_curbs(mask: np.ndarray,
 
     # gap tem que estar perto do centro da imagem
     mid_gap = float(np.median(gap_mids))
-    if abs(mid_gap - W/2) > 0.15 * W:
+    if abs(mid_gap - W / 2) > 0.15 * W:
         return False
 
     # e as duas “calçadas” têm que ficar de lados opostos do centro
@@ -202,14 +213,14 @@ def _has_two_curbs(mask: np.ndarray,
     cols = np.sort(cols)
     diffs = np.diff(cols)
     k = int(np.argmax(diffs))
-    left_cols  = cols[:k+1]
-    right_cols = cols[k+1:]
+    left_cols = cols[: k + 1]
+    right_cols = cols[k + 1 :]
     if not (left_cols.size and right_cols.size):
         return False
 
     c1 = left_cols.mean()
     c2 = right_cols.mean()
-    return (c1 < W/2) and (c2 > W/2)
+    return (c1 < W / 2) and (c2 > W / 2)
 
 
 def aggregate_headings(widths_per_heading, min_k=5):
@@ -222,18 +233,20 @@ def aggregate_headings(widths_per_heading, min_k=5):
         return 0.0, 0.0, 0.0
     med = np.median(w)
     mad = np.median(np.abs(w - med)) + 1e-6
-    keep = np.abs(w - med) <= 2.5 * 1.4826 * mad   # ~99% para normal
+    keep = np.abs(w - med) <= 2.5 * 1.4826 * mad  # ~99% para normal
     w2 = w[keep] if keep.any() else w
     med2 = float(np.median(w2))
     iqr2 = float(np.percentile(w2, 75) - np.percentile(w2, 25))
     # intervalo de confiança simples
-    lo = med2 - 0.5*iqr2
-    hi = med2 + 0.5*iqr2
+    lo = med2 - 0.5 * iqr2
+    hi = med2 + 0.5 * iqr2
     return med2, lo, hi
+
 
 # --------------------------------------------------------------------------- #
 # 2)  Public API – what the pipeline will call
 # --------------------------------------------------------------------------- #
+
 
 @dataclass(slots=True)
 class _WidthDebugRow:
@@ -252,26 +265,26 @@ class _WidthDebugRow:
 
 
 def compute_width(
-    sidewalk:      np.ndarray,          # bool mask (H×W)
-    depth:         np.ndarray | None = None,
-    pitch_deg:     float = -10.0,
-    fov_deg:       float = 90.0,
-    *,                                  # keyword-only
-    band_frac:     tuple[float, float] = (0.50, 1.00),
-    err_pct:       float = 25.0,
+    sidewalk: np.ndarray,  # bool mask (H×W)
+    depth: np.ndarray | None = None,
+    pitch_deg: float = -10.0,
+    fov_deg: float = 90.0,
+    *,  # keyword-only
+    band_frac: tuple[float, float] = (0.50, 1.00),
+    err_pct: float = 25.0,
     # --- knobs (quality gating & robustness) ---
-    band_mode:     str   = "adaptive",                  # "adaptive" | "fixed"
-    adaptive_pct:  tuple[float, float] = (0.60, 0.95),
-    du_range_px:   tuple[int, int] = (20, 220),         # ↓ mais estrito
-    parallax_range:tuple[float, float] = (0.05, 0.45),  # ↓ mais estrito
-    min_valid_rows:int   = 7,                           # ↑
+    band_mode: str = "adaptive",  # "adaptive" | "fixed"
+    adaptive_pct: tuple[float, float] = (0.60, 0.95),
+    du_range_px: tuple[int, int] = (20, 220),  # ↓ mais estrito
+    parallax_range: tuple[float, float] = (0.05, 0.45),  # ↓ mais estrito
+    min_valid_rows: int = 7,  # ↑
     use_data_driven_margin: bool = True,
-    divergence_pct: float = 0.25,                       # ↓
-    bottom_ignore_px: int = 20,                          # ignora a faixa com a logo
-    # debug
+    divergence_pct: float = 0.25,  # ↓
+    bottom_ignore_px: int = 20,  # ignora a faixa com a logo
+    # debug helpers
     debug: bool = False,
     debug_dir: Optional[str] = None,
-    debug_prefix: str = "compute_width"
+    debug_prefix: str = "compute_width",
 ) -> WidthResult:
     """
     Robust width estimation with:
@@ -283,29 +296,32 @@ def compute_width(
     H, W = sidewalk.shape
     H_eff = max(1, int(H) - int(bottom_ignore_px))  # ignora rodapé (logo)
     sidewalk = sidewalk.astype(bool)
-    log = _swai_log if debug else (lambda *args, **kwargs: None)
 
     # heurísticas suaves para frames sem parallax
-    DEPTH_MED = float(np.median(depth[np.isfinite(depth)])) if (depth is not None and np.isfinite(depth).any()) else None
+    DEPTH_MED = (
+        float(np.median(depth[np.isfinite(depth)]))
+        if (depth is not None and np.isfinite(depth).any())
+        else None
+    )
     SOFT_Z_CAP_FACTOR = 1.6
     SOFT_Z_CAP_GLOBAL = 5.5
     # Para evitar platô baixo em diagonais quando parallax==0:
     SOFT_TARGET_DU_MIN, SOFT_TARGET_DU_MAX = 170, 190
-    TARGET_DU_NEAR    = 170
-    Z_CAP_HARD        = float(np.clip((DEPTH_MED if DEPTH_MED else 3.2) * 1.45, 4.6, 6.0))
+    TARGET_DU_NEAR = 170
+    Z_CAP_HARD = float(np.clip((DEPTH_MED if DEPTH_MED else 3.2) * 1.45, 4.6, 6.0))
 
     # contadores e coletores
     near_perp_flag_rows = 0
     rows_seen = 0
-    skip_du   = 0
+    skip_du = 0
 
     # coletores por linha (geom “bruto” + DU de cada linha)
     widths_geom_raw: list[float] = []
-    du_list:         list[int]   = []
+    du_list: list[int] = []
 
     # profundidade por linha (somente quando parallax válido)
-    widths_depth:    list[float] = []
-    debug_rows:      list[_WidthDebugRow] = []
+    widths_depth: list[float] = []
+    debug_rows: list[_WidthDebugRow] = []
 
     parallax_valid_count = 0
     total_rows_considered = 0
@@ -315,53 +331,86 @@ def compute_width(
     fx, fy, cx, cy = _intrinsics_after_crop(W, fov_deg)
     v_h = cy - fy * np.tan(np.radians(pitch_deg))
 
-    log("intrinsics", {
-    "W": int(W), "H": int(H), "FOV_deg": float(fov_deg), "pitch_deg": float(pitch_deg),
-    "fx": float(fx), "fy": float(fy), "cx": float(cx), "cy": float(cy), "v_h": float(v_h)
-    })
+    _swai_log(
+        "intrinsics",
+        {
+            "W": int(W),
+            "H": int(H),
+            "FOV_deg": float(fov_deg),
+            "pitch_deg": float(pitch_deg),
+            "fx": float(fx),
+            "fy": float(fy),
+            "cx": float(cx),
+            "cy": float(cy),
+            "v_h": float(v_h),
+        },
+    )
 
     # 1) choose band  ──────────────────────────────────────────────────────────────
-    if band_mode == "adaptive":
-        ys_mask = np.where(sidewalk)[0]
-        if ys_mask.size >= 30:  # enough evidence
-            yq_lo = int(np.percentile(ys_mask, adaptive_pct[0] * 100))  # ~p60
-            yq_hi = int(np.percentile(ys_mask, adaptive_pct[1] * 100))  # ~p95
-            ymin  = max(yq_lo, int(v_h) + 5)
-            # altura mínima da banda (dinâmica: 5% de H, mas nunca <12 px)
-            MIN_BAND_PX = max(12, int(0.05 * H_eff))
-            ymax  = max(ymin + MIN_BAND_PX, yq_hi)  # ← antes era ymin + 1
-            y0, y1 = ymin, min(H_eff, ymax)
-        else:
-            y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
-            y0 = max(y0, int(v_h) + 5)
-            # também respeite a altura mínima aqui
-            MIN_BAND_PX = max(12, int(0.05 * H_eff))
-            if (y1 - y0) < MIN_BAND_PX:
-                y1 = min(H_eff, y0 + MIN_BAND_PX)
-    else:
-        y0, y1 = int(H * band_frac[0]), int(H * band_frac[1])
-        y0 = max(y0, int(v_h) + 5)
-        MIN_BAND_PX = max(12, int(0.05 * H_eff))
-        if (y1 - y0) < MIN_BAND_PX:
-            y1 = min(H_eff, y0 + MIN_BAND_PX)
+    # Novo critério: pega o maior trecho contíguo de linhas com máscara abaixo do horizonte,
+    # garantindo altura mínima mais generosa. Fallback para percentis amplos e banda fixa.
+    MIN_BAND_PX = max(20, int(0.08 * H_eff))
+    y_floor = max(int(v_h) + 5, 0)
+    y_ceiling = H_eff
 
-    # se por qualquer motivo a banda ainda ficou pequena, expanda simetricamente
-    if (y1 - y0) < MIN_BAND_PX:
-        deficit = MIN_BAND_PX - (y1 - y0)
-        grow = (deficit + 1) // 2
-        y0 = max(int(v_h) + 5, y0 - grow)
-        y1 = min(H_eff, y1 + grow)
-        if (y1 - y0) < MIN_BAND_PX:  # último reforço
-            y1 = min(H_eff, y0 + MIN_BAND_PX)
+    if y_floor >= y_ceiling - 2:
+        return WidthResult(0.0, 0.0, 0)
+
+    ys_mask = np.where(sidewalk)[0]
+    if band_mode == "fixed":
+        y0 = max(y_floor, int(H * band_frac[0]))
+        y1 = min(y_ceiling, int(H * band_frac[1]))
+        if (y1 - y0) < MIN_BAND_PX:
+            y1 = min(y_ceiling, y0 + MIN_BAND_PX)
+    else:
+        cov_rows = sidewalk[y_floor:y_ceiling].mean(axis=1) if y_ceiling > y_floor else np.array([])
+        # maior run contíguo de linhas com cobertura > 0
+        if cov_rows.size and np.any(cov_rows > 0):
+            nz = np.where(cov_rows > 0)[0]
+            best_start = nz[0]
+            best_len = 1
+            cur_start = nz[0]
+            cur_len = 1
+            for a, b in zip(nz, nz[1:]):
+                if b == a + 1:
+                    cur_len += 1
+                else:
+                    if cur_len > best_len:
+                        best_start, best_len = cur_start, cur_len
+                    cur_start, cur_len = b, 1
+            if cur_len > best_len:
+                best_start, best_len = cur_start, cur_len
+            y0 = y_floor + best_start
+            y1 = y0 + best_len
+        else:
+            y0 = y_floor
+            y1 = min(y_ceiling, y_floor + MIN_BAND_PX)
+
+        # expanda para garantir altura mínima
+        if (y1 - y0) < MIN_BAND_PX:
+            grow = (MIN_BAND_PX - (y1 - y0) + 1) // 2
+            y0 = max(y_floor, y0 - grow)
+            y1 = min(y_ceiling, y1 + grow)
+            if (y1 - y0) < MIN_BAND_PX:
+                y1 = min(y_ceiling, y0 + MIN_BAND_PX)
+
+        # fallback largo baseado em percentis se a banda continua curta ou sem máscara
+        if (ys_mask.size >= 5) and ((y1 - y0) < max(MIN_BAND_PX, int(0.10 * H_eff))):
+            yq_lo = int(np.percentile(ys_mask, 20))
+            yq_hi = int(np.percentile(ys_mask, 98))
+            y0 = max(y_floor, yq_lo)
+            y1 = min(y_ceiling, max(y0 + MIN_BAND_PX, yq_hi))
+            if (y1 - y0) < MIN_BAND_PX:
+                y1 = min(y_ceiling, y0 + MIN_BAND_PX)
 
     band = sidewalk[y0:y1].astype(np.uint8)
     band_cov = float(band.sum()) / float(band.size) if band.size else 0.0
     cov_norm = float(np.clip((band_cov - 0.10) / 0.25, 0.0, 1.0))
 
-    log("band", {
-        "mode": band_mode, "y0": int(y0), "y1": int(y1),
-        "height": int(y1 - y0), "cov": band_cov
-    })
+    _swai_log(
+        "band",
+        {"mode": band_mode, "y0": int(y0), "y1": int(y1), "height": int(y1 - y0), "cov": band_cov},
+    )
 
     # ── DU gating adaptativo ─────────────────────────────────────────────────────
     DU_LO_FLOOR = 6  # não deixe Δu exigir mais que isso em casos extremos
@@ -372,16 +421,27 @@ def compute_width(
     du_prior = (float(fx) / max(1.0, Z_soft)) * 2.1  # px para ~2.1m
 
     # quando a cobertura é baixa (cov_norm→0), aceite Δu menor
-    du_lo_eff = int(np.clip(
-        np.interp(cov_norm, [0.0, 0.5, 1.0],
-                [max(DU_LO_FLOOR, 0.35*du_prior), max(10.0, 0.5*du_prior), du_lo_base]),
-        DU_LO_FLOOR, du_lo_base
-    ))
+    du_lo_eff = int(
+        np.clip(
+            np.interp(
+                cov_norm,
+                [0.0, 0.5, 1.0],
+                [max(DU_LO_FLOOR, 0.35 * du_prior), max(10.0, 0.5 * du_prior), du_lo_base],
+            ),
+            DU_LO_FLOOR,
+            du_lo_base,
+        )
+    )
 
-    log("du_gating", {
-        "du_lo_eff": int(du_lo_eff), "du_hi": int(du_hi),
-        "du_prior": float(du_prior), "cov_norm": float(cov_norm)
-    })
+    _swai_log(
+        "du_gating",
+        {
+            "du_lo_eff": int(du_lo_eff),
+            "du_hi": int(du_hi),
+            "du_prior": float(du_prior),
+            "cov_norm": float(cov_norm),
+        },
+    )
 
     if y0 >= y1 - 5:
         return WidthResult(0.0, 0.0, 0)
@@ -412,19 +472,15 @@ def compute_width(
         return frac, gap
 
     frac_dom, gap_cols = _continuity_score(sidewalk, y0, y1)
-    log("continuity", {
-        "frac_dom": float(frac_dom),
-        "gap_cols": int(gap_cols)
-    })
+    _swai_log("continuity", {"frac_dom": float(frac_dom), "gap_cols": int(gap_cols)})
 
     # thresholds adaptativos:
     # - quanto MENOR a cobertura, MENOR a exigência de fração dominante
     # - NÃO descartamos por gap (oclusão é esperada); exigimos só linhas válidas depois
-    cont_min = 0.25 + 0.25 * cov_norm   # 0.30–0.60
+    cont_min = 0.25 + 0.25 * cov_norm  # 0.30–0.60
     if frac_dom < cont_min:
-        log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
+        _swai_log("continuity_fail", {"band_cov": float(band_cov), "cont_min": float(cont_min)})
         return WidthResult(0.0, 0.0, 0)
-
 
     # 4) per-row computation with gating
     du_hi = du_range_px[1]
@@ -436,6 +492,7 @@ def compute_width(
         cols = np.where(sidewalk[v])[0]
         if cols.size < 2:
             continue
+        gap_max = None
         bridged = False
         # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
         if cols.size >= 2:
@@ -443,20 +500,24 @@ def compute_width(
             diffs = np.diff(cs)
             if diffs.size > 0:
                 g = int(diffs.max())
+                gap_max = g
                 # janela padrão de oclusão (ajuste fino se precisar)
                 #   • low coverage → aceite gaps maiores
                 gap_lo = 40
                 gap_hi = int(np.interp(cov_norm, [0.0, 1.0], [160, 120]))  # 160→120 px
                 if g >= gap_lo and g <= gap_hi:
                     idx = int(np.argmax(diffs))
-                    left_end  = cs[idx]
-                    right_beg = cs[idx+1]
-                    bridge = np.arange(left_end, right_beg+1, dtype=int)
-                    cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
+                    left_end = cs[idx]
+                    right_beg = cs[idx + 1]
+                    bridge = np.arange(left_end, right_beg + 1, dtype=int)
+                    cs = np.concatenate([cs[: idx + 1], bridge, cs[idx + 1 :]])
                     cols = cs
                     bridged = True
-        # q cresce com a cobertura: 0.22 → 0.30
-        q = 0.22 + 0.08 * cov_norm
+        # q adaptativo: mais inclusivo quando a linha é contínua (gap pequeno)
+        if gap_max is not None and gap_max <= 25:
+            q = float(np.interp(cov_norm, [0.0, 0.5, 1.0], [0.18, 0.14, 0.12]))
+        else:
+            q = 0.22 + 0.08 * cov_norm
         uL_q = int(np.quantile(cols, q))
         uR_q = int(np.quantile(cols, 1.0 - q))
 
@@ -466,13 +527,26 @@ def compute_width(
         else:
             uL, uR = uL_q, uR_q
 
+        # se o quantil recortou demais e a linha é contínua, use a extensão total
+        span_full = cols[-1] - cols[0]
+        used_full_span = False
+        if span_full > 0 and (uR - uL) < 0.85 * span_full:
+            if (gap_max is None or gap_max <= 20) and cov_norm >= 0.15:
+                uL, uR = cols[0], cols[-1]
+                used_full_span = True
+
         du = uR - uL
 
-        was_near_perp = (du > du_hi)
+        was_near_perp = du > du_hi
         rows_seen += 1
         row_dbg = _WidthDebugRow(
-            v=int(v), uL=int(uL), uR=int(uR), du=int(du),
-            near_perp=bool(was_near_perp), from_retry=False, bridged_gap=bridged
+            v=int(v),
+            uL=int(uL),
+            uR=int(uR),
+            du=int(du),
+            near_perp=bool(was_near_perp),
+            from_retry=False,
+            bridged_gap=bridged,
         )
         if du < du_lo_eff:
             skip_du += 1
@@ -483,7 +557,66 @@ def compute_width(
         if du > du_hi:
             # === near-perp: puxe para um DU interno estável ===
             near_perp_flag_rows += 1
-            target_near = float(np.clip((float(TARGET_DU_NEAR) * (1.0 + 0.06*(0.5 - np.random.rand()))), 150.0, 190.0))
+            soft_near_perp = (
+                (gap_max is not None and gap_max <= 20)
+                and (cov_norm >= 0.15)
+                and (du <= int(1.4 * du_hi))
+            )
+            if debug:
+                _swai_log(
+                    "near_perp_row",
+                    {
+                        "v": int(v),
+                        "gap_max": None if gap_max is None else int(gap_max),
+                        "cov_norm": float(cov_norm),
+                        "q": float(q),
+                        "uL_q": int(uL_q),
+                        "uR_q": int(uR_q),
+                        "uL": int(uL),
+                        "uR": int(uR),
+                        "span_full": int(span_full),
+                        "used_full_span": bool(used_full_span),
+                        "du": int(du),
+                        "du_hi": int(du_hi),
+                        "soft_near_perp": bool(soft_near_perp),
+                    },
+                )
+            if soft_near_perp:
+                total_rows_considered += 1
+                XL_g, ZL_g = _ground_intersection(
+                    np.array([uL], dtype=np.float32),
+                    np.array([v], dtype=np.float32),
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    pitch_deg,
+                )
+                XR_g, ZR_g = _ground_intersection(
+                    np.array([uR], dtype=np.float32),
+                    np.array([v], dtype=np.float32),
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    pitch_deg,
+                )
+                ZL = float(min(ZL_g[0], Z_CAP_HARD)) if np.isfinite(ZL_g[0]) else float(ZL_g[0])
+                ZR = float(min(ZR_g[0], Z_CAP_HARD)) if np.isfinite(ZR_g[0]) else float(ZR_g[0])
+                XL = (uL - cx) * ZL / fx
+                XR = (uR - cx) * ZR / fx
+                if np.isfinite(XL) and np.isfinite(XR):
+                    widths_geom_raw.append(abs(XR - XL))
+                    du_list.append(int(du))
+                    row_dbg.width_geom = float(abs(XR - XL))
+                    was_near_perp_count += 1
+                debug_rows.append(row_dbg)
+                continue
+            target_near = float(
+                np.clip(
+                    (float(TARGET_DU_NEAR) * (1.0 + 0.06 * (0.5 - np.random.rand()))), 150.0, 190.0
+                )
+            )
             excess = du - target_near
             if excess > 0:
                 shrink = max(1, excess // 2)
@@ -499,12 +632,24 @@ def compute_width(
                 row_dbg.uR = int(uR2)
                 row_dbg.du = int(du2)
                 total_rows_considered += 1
-                XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
-                                                  np.array([v], dtype=np.float32),
-                                                  fx, fy, cx, cy, pitch_deg)
-                XR_g, ZR_g = _ground_intersection(np.array([uR], dtype=np.float32),
-                                                  np.array([v], dtype=np.float32),
-                                                  fx, fy, cx, cy, pitch_deg)
+                XL_g, ZL_g = _ground_intersection(
+                    np.array([uL], dtype=np.float32),
+                    np.array([v], dtype=np.float32),
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    pitch_deg,
+                )
+                XR_g, ZR_g = _ground_intersection(
+                    np.array([uR], dtype=np.float32),
+                    np.array([v], dtype=np.float32),
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    pitch_deg,
+                )
                 ZL = float(min(ZL_g[0], Z_CAP_HARD)) if np.isfinite(ZL_g[0]) else float(ZL_g[0])
                 ZR = float(min(ZR_g[0], Z_CAP_HARD)) if np.isfinite(ZR_g[0]) else float(ZR_g[0])
                 XL = (uL - cx) * ZL / fx
@@ -525,12 +670,24 @@ def compute_width(
         total_rows_considered += 1
 
         # Geometric path (always available below the horizon)
-        XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
-                                          np.array([v], dtype=np.float32),
-                                          fx, fy, cx, cy, pitch_deg)
-        XR_g, ZR_g = _ground_intersection(np.array([uR], dtype=np.float32),
-                                          np.array([v], dtype=np.float32),
-                                          fx, fy, cx, cy, pitch_deg)
+        XL_g, ZL_g = _ground_intersection(
+            np.array([uL], dtype=np.float32),
+            np.array([v], dtype=np.float32),
+            fx,
+            fy,
+            cx,
+            cy,
+            pitch_deg,
+        )
+        XR_g, ZR_g = _ground_intersection(
+            np.array([uR], dtype=np.float32),
+            np.array([v], dtype=np.float32),
+            fx,
+            fy,
+            cx,
+            cy,
+            pitch_deg,
+        )
         if np.isfinite(XL_g[0]) and np.isfinite(XR_g[0]):
             if was_near_perp:
                 # clamp "duro" já existente (Z_CAP ~ 5.0)
@@ -540,14 +697,15 @@ def compute_width(
                 XR = (uR - cx) * ZR / fx
                 widths_geom_raw.append(abs(XR - XL))
                 du_list.append(int(du))
-                was_near_perp_count += 1
                 row_dbg.width_geom = float(abs(XR - XL))
+                was_near_perp_count += 1
             else:
                 # --- clamp "suave" guiado pelo Zoe quando parallax for inexistente ---
                 if DEPTH_MED is not None:
                     Z_SOFT = min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL)
                     # só aplica se o Z geométrico está acima do "saudável"
-                    ZLg = float(ZL_g[0]); ZRg = float(ZR_g[0])
+                    ZLg = float(ZL_g[0])
+                    ZRg = float(ZR_g[0])
                     ZL = ZLg if ZLg <= Z_SOFT else Z_SOFT
                     ZR = ZRg if ZRg <= Z_SOFT else Z_SOFT
                     XL = (uL - cx) * ZL / fx
@@ -561,7 +719,6 @@ def compute_width(
                     du_list.append(int(du))
                     row_dbg.width_geom = float(width_geom_val)
 
-        par = None
         # Depth-assisted path (safe indexing)
         if depth is not None:
             # ensure integer indices and in-bounds
@@ -582,9 +739,10 @@ def compute_width(
                 depth_good_rows += 1
             # parallax score
             par = abs(ZL - ZR) / zmean if zmean > 1e-6 else 0.0
+            row_dbg.parallax = float(par)
             if depth_good_rows >= max(3, int(0.5 * min_valid_rows)):
                 # quando a profundidade na banda parece boa, aceite também parallax muito baixo
-                use_depth_row = (par <= par_hi)
+                use_depth_row = par <= par_hi
             else:
                 use_depth_row = (par >= par_lo) and (par <= par_hi)
             if use_depth_row:
@@ -596,14 +754,17 @@ def compute_width(
                     widths_depth.append(depth_width_val)
                     row_dbg.width_depth = float(depth_width_val)
                     row_dbg.used_depth = True
-            row_dbg.parallax = float(par) if par is not None else None
+
         debug_rows.append(row_dbg)
 
     # fallback leve: se todas as linhas foram descartadas por Δu, tenta subir o band em 20 px uma vez
     if total_rows_considered == 0 and skip_du == rows_seen and (y0 > int(v_h) + 25):
         y0b = max(int(v_h) + 5, y0 - 20)
         y1b = max(y0b + 1, y1 - 20)
-        log("band_retry", {"y0_old": int(y0), "y1_old": int(y1), "y0_new": int(y0b), "y1_new": int(y1b)})
+        _swai_log(
+            "band_retry",
+            {"y0_old": int(y0), "y1_old": int(y1), "y0_new": int(y0b), "y1_new": int(y1b)},
+        )
         v_rows = np.arange(y0b, y1b)
         band_b = sidewalk[y0b:y1b].astype(np.uint8)
         band_cov_b = float(band_b.sum()) / float(band_b.size) if band_b.size else 0.0
@@ -614,6 +775,7 @@ def compute_width(
             cols = np.where(sidewalk[v])[0]
             if cols.size < 2:
                 continue
+            gap_max = None
             bridged = False
             # --- bridge virtual: unifica dois clusters separados por um gap plausível de oclusão ---
             if cols.size >= 2:
@@ -621,31 +783,46 @@ def compute_width(
                 diffs = np.diff(cs)
                 if diffs.size > 0:
                     g = int(diffs.max())
+                    gap_max = g
                     # janela padrão de oclusão (ajuste fino se precisar)
                     #   • low coverage → aceite gaps maiores
                     gap_lo = 40
                     gap_hi = int(np.interp(cov_norm, [0.0, 1.0], [160, 120]))  # 160→120 px
                     if g >= gap_lo and g <= gap_hi:
                         idx = int(np.argmax(diffs))
-                        left_end  = cs[idx]
-                        right_beg = cs[idx+1]
-                        bridge = np.arange(left_end, right_beg+1, dtype=int)
-                        cs = np.concatenate([cs[:idx+1], bridge, cs[idx+1:]])
-                        cols = cs
-                        bridged = True
+                        left_end = cs[idx]
+                        right_beg = cs[idx + 1]
+                    bridge = np.arange(left_end, right_beg + 1, dtype=int)
+                    cs = np.concatenate([cs[: idx + 1], bridge, cs[idx + 1 :]])
+                    cols = cs
+                    bridged = True
             # quantis internos (iguais ao loop principal)
-            q = 0.22 + 0.08 * cov_norm_b
+            if gap_max is not None and gap_max <= 25:
+                q = float(np.interp(cov_norm_b, [0.0, 0.5, 1.0], [0.18, 0.14, 0.12]))
+            else:
+                q = 0.22 + 0.08 * cov_norm_b
             uL_q = int(np.quantile(cols, q))
             uR_q = int(np.quantile(cols, 1.0 - q))
             if uR_q - uL_q < 3:
                 uL, uR = cols[0], cols[-1]
             else:
                 uL, uR = uL_q, uR_q
+            span_full = cols[-1] - cols[0]
+            used_full_span = False
+            if span_full > 0 and (uR - uL) < 0.85 * span_full:
+                if (gap_max is None or gap_max <= 20) and cov_norm_b >= 0.15:
+                    uL, uR = cols[0], cols[-1]
+                    used_full_span = True
             du = uR - uL
-            was_near_perp = (du > du_hi)
+            was_near_perp = du > du_hi
             row_dbg = _WidthDebugRow(
-                v=int(v), uL=int(uL), uR=int(uR), du=int(du),
-                near_perp=bool(was_near_perp), from_retry=True, bridged_gap=bridged
+                v=int(v),
+                uL=int(uL),
+                uR=int(uR),
+                du=int(du),
+                near_perp=bool(was_near_perp),
+                from_retry=True,
+                bridged_gap=bridged,
             )
             if du < du_lo_eff:
                 row_dbg.skipped_du = True
@@ -654,7 +831,68 @@ def compute_width(
             if du > du_hi:
                 # === near-perp: traga as bordas para um DU alvo estável ===
                 near_perp_flag_rows += 1
-                target_near = float(np.clip((float(TARGET_DU_NEAR) * (1.0 + 0.06*(0.5 - np.random.rand()))), 150.0, 190.0))
+                soft_near_perp = (
+                    (gap_max is not None and gap_max <= 20)
+                    and (cov_norm_b >= 0.15)
+                    and (du <= int(1.4 * du_hi))
+                )
+                if debug:
+                    _swai_log(
+                        "near_perp_row_retry",
+                        {
+                            "v": int(v),
+                            "gap_max": None if gap_max is None else int(gap_max),
+                            "cov_norm": float(cov_norm_b),
+                            "q": float(q),
+                            "uL_q": int(uL_q),
+                            "uR_q": int(uR_q),
+                            "uL": int(uL),
+                            "uR": int(uR),
+                            "span_full": int(span_full),
+                            "used_full_span": bool(used_full_span),
+                            "du": int(du),
+                            "du_hi": int(du_hi),
+                            "soft_near_perp": bool(soft_near_perp),
+                        },
+                    )
+                if soft_near_perp:
+                    total_rows_considered += 1
+                    XL_g, ZL_g = _ground_intersection(
+                        np.array([uL], dtype=np.float32),
+                        np.array([v], dtype=np.float32),
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        pitch_deg,
+                    )
+                    XR_g, ZR_g = _ground_intersection(
+                        np.array([uR], dtype=np.float32),
+                        np.array([v], dtype=np.float32),
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        pitch_deg,
+                    )
+                    ZL = float(min(ZL_g[0], Z_CAP_HARD)) if np.isfinite(ZL_g[0]) else float(ZL_g[0])
+                    ZR = float(min(ZR_g[0], Z_CAP_HARD)) if np.isfinite(ZR_g[0]) else float(ZR_g[0])
+                    XL = (uL - cx) * ZL / fx
+                    XR = (uR - cx) * ZR / fx
+                    if np.isfinite(XL) and np.isfinite(XR):
+                        widths_geom_raw.append(abs(XR - XL))
+                        du_list.append(int(du))
+                        row_dbg.width_geom = float(abs(XR - XL))
+                        was_near_perp_count += 1
+                    debug_rows.append(row_dbg)
+                    continue
+                target_near = float(
+                    np.clip(
+                        (float(TARGET_DU_NEAR) * (1.0 + 0.06 * (0.5 - np.random.rand()))),
+                        150.0,
+                        190.0,
+                    )
+                )
                 excess = du - target_near
                 if excess > 0:
                     shrink = max(1, excess // 2)
@@ -670,12 +908,24 @@ def compute_width(
                     row_dbg.uR = int(uR2)
                     row_dbg.du = int(du2)
                     total_rows_considered += 1
-                    XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
-                                                    np.array([v], dtype=np.float32),
-                                                    fx, fy, cx, cy, pitch_deg)
-                    XR_g, ZR_g = _ground_intersection(np.array([uR], dtype=np.float32),
-                                                    np.array([v], dtype=np.float32),
-                                                    fx, fy, cx, cy, pitch_deg)
+                    XL_g, ZL_g = _ground_intersection(
+                        np.array([uL], dtype=np.float32),
+                        np.array([v], dtype=np.float32),
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        pitch_deg,
+                    )
+                    XR_g, ZR_g = _ground_intersection(
+                        np.array([uR], dtype=np.float32),
+                        np.array([v], dtype=np.float32),
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        pitch_deg,
+                    )
                     ZL = float(min(ZL_g[0], Z_CAP_HARD)) if np.isfinite(ZL_g[0]) else float(ZL_g[0])
                     ZR = float(min(ZR_g[0], Z_CAP_HARD)) if np.isfinite(ZR_g[0]) else float(ZR_g[0])
                     XL = (uL - cx) * ZL / fx
@@ -694,12 +944,24 @@ def compute_width(
                 row_dbg.du = int(du)
 
             # só geométrico no retry
-            XL_g, ZL_g = _ground_intersection(np.array([uL], dtype=np.float32),
-                                            np.array([v], dtype=np.float32),
-                                            fx, fy, cx, cy, pitch_deg)
-            XR_g, ZR_g = _ground_intersection(np.array([uR], dtype=np.float32),
-                                            np.array([v], dtype=np.float32),
-                                            fx, fy, cx, cy, pitch_deg)
+            XL_g, ZL_g = _ground_intersection(
+                np.array([uL], dtype=np.float32),
+                np.array([v], dtype=np.float32),
+                fx,
+                fy,
+                cx,
+                cy,
+                pitch_deg,
+            )
+            XR_g, ZR_g = _ground_intersection(
+                np.array([uR], dtype=np.float32),
+                np.array([v], dtype=np.float32),
+                fx,
+                fy,
+                cx,
+                cy,
+                pitch_deg,
+            )
             if np.isfinite(XL_g[0]) and np.isfinite(XR_g[0]):
                 if was_near_perp:
                     ZL = float(min(ZL_g[0], Z_CAP_HARD))
@@ -718,19 +980,22 @@ def compute_width(
 
             debug_rows.append(row_dbg)
 
-    log("rows_counters", {
-        "rows_seen": int(rows_seen),
-        "rows_considered": int(total_rows_considered),
-        "skipped_du": int(skip_du),
-        "near_perp_rows": int(near_perp_flag_rows),
-        "was_near_perp_frac": float(was_near_perp_count) / float(max(1, rows_seen)),
-        "n_geom_rows": len(widths_geom_raw),
-        "n_depth_rows": len(widths_depth)
-    })
+    _swai_log(
+        "rows_counters",
+        {
+            "rows_seen": int(rows_seen),
+            "rows_considered": int(total_rows_considered),
+            "skipped_du": int(skip_du),
+            "near_perp_rows": int(near_perp_flag_rows),
+            "was_near_perp_frac": float(was_near_perp_count) / float(max(1, rows_seen)),
+            "n_geom_rows": len(widths_geom_raw),
+            "n_depth_rows": len(widths_depth),
+        },
+    )
 
-    band_h = (y1 - y0)
+    band_h = y1 - y0
 
-    if band_cov < 0.03:                        # banda muito rara
+    if band_cov < 0.03:  # banda muito rara
         min_rows_eff = 2
     elif band_cov < 0.08 or band_h <= MIN_BAND_PX:
         min_rows_eff = max(3, int(0.5 * min_valid_rows))
@@ -739,20 +1004,31 @@ def compute_width(
     else:
         min_rows_eff = min_valid_rows
 
-
     # fração de linhas com parallax válido (precisamos disto ANTES das flags)
-    par_frac = (parallax_valid_count / max(1, total_rows_considered)) if total_rows_considered else 0.0
+    par_frac = (
+        (parallax_valid_count / max(1, total_rows_considered)) if total_rows_considered else 0.0
+    )
 
     # --- SUAVE: pós-processamento quando parallax == 0 e NÃO é near-perp dominante ---
-    near_perp_dominante = (near_perp_flag_rows >= max(3, int(0.3 * max(1, rows_seen)))) and (depth_good_rows < min_rows_eff)
+    near_perp_dominante = (near_perp_flag_rows >= max(3, int(0.3 * max(1, rows_seen)))) and (
+        depth_good_rows < min_rows_eff
+    )
     widths_geom_final = list(widths_geom_raw)
 
-    if (parallax_valid_count == 0) and (not near_perp_dominante) and (len(widths_geom_raw) >= min_rows_eff):
+    if (
+        (parallax_valid_count == 0)
+        and (not near_perp_dominante)
+        and (len(widths_geom_raw) >= min_rows_eff)
+    ):
         med_du = float(np.median(du_list)) if len(du_list) else None
         if med_du and np.isfinite(med_du):
             # piso dinâmico sugerido pela profundidade da cena
-            Z_soft = min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL) if DEPTH_MED is not None else 5.0
-            du_from_depth = (float(fx) / max(1.0, Z_soft)) * 2.1   # largura-prior 2.1 m
+            Z_soft = (
+                min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL)
+                if DEPTH_MED is not None
+                else 5.0
+            )
+            du_from_depth = (float(fx) / max(1.0, Z_soft)) * 2.1  # largura-prior 2.1 m
 
             # Ajusta o piso/alvo em DU para o FOV atual (baseline ~75°),
             # de forma que o intervalo [SOFT_TARGET_DU_MIN, SOFT_TARGET_DU_MAX]
@@ -769,18 +1045,23 @@ def compute_width(
             target_du = float(np.clip(med_du, du_floor, soft_du_max))
 
             # α adaptativo (0.35–0.85) aumenta quando cobertura baixa e parallax==0
-            alpha = float(np.clip(0.35 + 0.40*(1.0 - par_frac) + 0.15*(1.0 - cov_norm), 0.35, 0.85))
+            alpha = float(
+                np.clip(0.35 + 0.40 * (1.0 - par_frac) + 0.15 * (1.0 - cov_norm), 0.35, 0.85)
+            )
             # ^ aqui (1.0 - 0.0) representa "100% sem parallax"; se você computar par_frac>0, use (1.0 - par_frac)
 
-            log("soft_adjust_du", {
-                "reason": "parallax==0",
-                "med_du": med_du,
-                "du_from_depth": du_from_depth,
-                "target_du": target_du,
-                "alpha": alpha,
-                "band_cov": band_cov,
-                "par_frac": par_frac
-            })
+            _swai_log(
+                "soft_adjust_du",
+                {
+                    "reason": "parallax==0",
+                    "med_du": med_du,
+                    "du_from_depth": du_from_depth,
+                    "target_du": target_du,
+                    "alpha": alpha,
+                    "band_cov": band_cov,
+                    "par_frac": par_frac,
+                },
+            )
 
             adj = []
             for w, du0 in zip(widths_geom_raw, du_list):
@@ -790,6 +1071,53 @@ def compute_width(
                     adj.append((1.0 - alpha) * w + alpha * (scale * w))
             if len(adj) >= min_rows_eff:
                 widths_geom_final = adj
+    # Ajuste adicional quando a banda começa alta (calçada próxima, base cortada)
+    elif (
+        (parallax_valid_count < 2)
+        and (not near_perp_dominante)
+        and (len(widths_geom_raw) >= min_rows_eff)
+    ):
+        band_start_high = (y0 - max(int(v_h) + 5, 0)) > max(MIN_BAND_PX, int(0.12 * H_eff))
+        if band_start_high:
+            med_du = float(np.median(du_list)) if len(du_list) else None
+            if med_du and np.isfinite(med_du):
+                Z_soft = (
+                    min(DEPTH_MED * SOFT_Z_CAP_FACTOR, SOFT_Z_CAP_GLOBAL)
+                    if DEPTH_MED is not None
+                    else 5.0
+                )
+                du_from_depth = (float(fx) / max(1.0, Z_soft)) * 2.1  # largura-prior 2.1 m
+                FOV_BASE_DEG = 75.0
+                fx_base = W / (2 * np.tan(np.radians(FOV_BASE_DEG / 2.0)))
+                f_scale = float(fx / fx_base) if fx_base > 0 else 1.0
+                soft_du_min = SOFT_TARGET_DU_MIN * f_scale
+                soft_du_max = SOFT_TARGET_DU_MAX * f_scale
+                du_floor = float(np.clip(du_from_depth, soft_du_min, soft_du_max))
+                target_du = float(np.clip(med_du, du_floor, soft_du_max))
+                alpha = float(
+                    np.clip(0.45 + 0.30 * (1.0 - par_frac) + 0.15 * (1.0 - cov_norm), 0.35, 0.85)
+                )
+                _swai_log(
+                    "soft_adjust_du_high_band",
+                    {
+                        "reason": "band_start_high",
+                        "y0": int(y0),
+                        "v_h": float(v_h),
+                        "med_du": med_du,
+                        "du_from_depth": du_from_depth,
+                        "target_du": target_du,
+                        "alpha": alpha,
+                        "band_cov": band_cov,
+                        "par_frac": par_frac,
+                    },
+                )
+                adj = []
+                for w, du0 in zip(widths_geom_raw, du_list):
+                    if du0 > 0:
+                        scale = target_du / float(du0)
+                        adj.append((1.0 - alpha) * w + alpha * (scale * w))
+                if len(adj) >= min_rows_eff:
+                    widths_geom_final = adj
 
     # 5) agregação robusta AGORA sobre os vetores finais
     def robust_agg(arr):
@@ -816,14 +1144,17 @@ def compute_width(
                 keep = du_arr >= du_thresh
                 if int(keep.sum()) >= max(min_rows_eff, 3):
                     widths_geom_for_agg = [w for w, k in zip(widths_geom_final, keep) if k]
-                    log("du_focus", {
-                        "du_p10": du_p10,
-                        "du_p90": du_p90,
-                        "du_spread": du_spread,
-                        "du_thresh": du_thresh,
-                        "kept": int(keep.sum()),
-                        "total": int(len(widths_geom_final)),
-                    })
+                    _swai_log(
+                        "du_focus",
+                        {
+                            "du_p10": du_p10,
+                            "du_p90": du_p90,
+                            "du_spread": du_spread,
+                            "du_thresh": du_thresh,
+                            "kept": int(keep.sum()),
+                            "total": int(len(widths_geom_final)),
+                        },
+                    )
 
     med_g, iqr_g = robust_agg(widths_geom_for_agg)
     med_d, iqr_d = robust_agg(widths_depth)
@@ -833,25 +1164,34 @@ def compute_width(
     if iqr_d is not None and np.isfinite(iqr_d) and abs(iqr_d) < 1e-3:
         iqr_d = 0.0
 
-    log("agg_pre", {
-        "n_geom": len(widths_geom_final), "n_depth": len(widths_depth),
-        "med_g": None if np.isnan(med_g) else float(med_g),
-        "iqr_g": None if np.isnan(iqr_g) else float(iqr_g),
-        "med_d": None if np.isnan(med_d) else float(med_d),
-        "iqr_d": None if np.isnan(iqr_d) else float(iqr_d),
-    })
+    _swai_log(
+        "agg_pre",
+        {
+            "n_geom": len(widths_geom_final),
+            "n_depth": len(widths_depth),
+            "med_g": None if np.isnan(med_g) else float(med_g),
+            "iqr_g": None if np.isnan(iqr_g) else float(iqr_g),
+            "med_d": None if np.isnan(med_d) else float(med_d),
+            "iqr_d": None if np.isnan(iqr_d) else float(iqr_d),
+        },
+    )
 
     # se nada válido, saia (mas com fallback opcional de baixa confiança)
-    if (np.isnan(med_g) or len(widths_geom_final) < min_rows_eff) and \
-    (np.isnan(med_d) or len(widths_depth)     < min_rows_eff):
+    if (np.isnan(med_g) or len(widths_geom_final) < min_rows_eff) and (
+        np.isnan(med_d) or len(widths_depth) < min_rows_eff
+    ):
 
         if len(widths_geom_final) >= 3:
             width_fallback = float(np.median(widths_geom_final))
             margin_fb = max((err_pct / 100.0) * width_fallback, 0.35 * width_fallback)
-            log("result_lowconf", {
-                "width": width_fallback, "margin": margin_fb,
-                "nrows": int(len(widths_geom_final))
-            })
+            _swai_log(
+                "result_lowconf",
+                {
+                    "width": width_fallback,
+                    "margin": margin_fb,
+                    "nrows": int(len(widths_geom_final)),
+                },
+            )
             return WidthResult(width_fallback, margin_fb, int(len(widths_geom_final)))
 
         return WidthResult(0.0, 0.0, 0)
@@ -862,42 +1202,53 @@ def compute_width(
     #    return WidthResult(0.0, 0.0, 0)
 
     # flags de confiabilidade (agora com par_frac definido)
-    depth_reliable_base = (not np.isnan(med_d)) and (len(widths_depth) >= max(3, int(0.5 * min_rows_eff)))
+    depth_reliable_base = (not np.isnan(med_d)) and (
+        len(widths_depth) >= max(3, int(0.5 * min_rows_eff))
+    )
     depth_reliable = depth_reliable_base and (par_frac >= 0.6)
-    geom_reliable  = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_rows_eff)
+    geom_reliable = (not np.isnan(med_g)) and (len(widths_geom_final) >= min_rows_eff)
 
-    log("parallax", {
-        "parallax_valid_count": int(parallax_valid_count),
-        "total_rows_considered": int(total_rows_considered),
-        "par_frac": float(par_frac)
-    })
-    log("reliability", {
-        "depth_reliable": bool(depth_reliable),
-        "geom_reliable": bool(geom_reliable)
-    })
+    _swai_log(
+        "parallax",
+        {
+            "parallax_valid_count": int(parallax_valid_count),
+            "total_rows_considered": int(total_rows_considered),
+            "par_frac": float(par_frac),
+        },
+    )
+    _swai_log(
+        "reliability",
+        {"depth_reliable": bool(depth_reliable), "geom_reliable": bool(geom_reliable)},
+    )
 
     # preferência por geom quando near-perp domina
     if near_perp_dominante:
         depth_reliable = False
-        log("near_perp_force_geom", {"near_perp_rows": int(near_perp_flag_rows), "rows_seen": int(rows_seen)})
+        _swai_log(
+            "near_perp_force_geom",
+            {"near_perp_rows": int(near_perp_flag_rows), "rows_seen": int(rows_seen)},
+        )
 
     # decisão final
     if depth_reliable and geom_reliable:
         denom = max(1e-6, max(med_d, med_g))
         div = abs(med_d - med_g) / denom
-        log("divergence", {
-            "med_d": None if np.isnan(med_d) else float(med_d),
-            "med_g": None if np.isnan(med_g) else float(med_g),
-            "div": float(div),
-            "divergence_pct": float(divergence_pct)
-        })
+        _swai_log(
+            "divergence",
+            {
+                "med_d": None if np.isnan(med_d) else float(med_d),
+                "med_g": None if np.isnan(med_g) else float(med_g),
+                "div": float(div),
+                "divergence_pct": float(divergence_pct),
+            },
+        )
         chosen = "depth"
     elif depth_reliable:
         chosen = "depth"
     else:
         chosen = "geom"
 
-    log("chosen", {"chosen": chosen})
+    _swai_log("chosen", {"chosen": chosen})
     if chosen == "depth":
         width, iqr, nrows = float(med_d), iqr_d, len(widths_depth)
         if geom_reliable and np.isfinite(med_g):
@@ -913,13 +1264,16 @@ def compute_width(
 
             geom_floor = geom_floor_frac * G
             if width < geom_floor:
-                log("depth_geom_floor", {
-                    "med_d": float(med_d),
-                    "med_g": float(med_g),
-                    "width_before": width,
-                    "geom_floor": geom_floor,
-                    "frac": geom_floor_frac,
-                })
+                _swai_log(
+                    "depth_geom_floor",
+                    {
+                        "med_d": float(med_d),
+                        "med_g": float(med_g),
+                        "width_before": width,
+                        "geom_floor": geom_floor,
+                        "frac": geom_floor_frac,
+                    },
+                )
                 width = geom_floor
                 if iqr_g is not None and np.isfinite(iqr_g):
                     base_iqr = iqr if (iqr is not None and np.isfinite(iqr)) else 0.0
@@ -931,40 +1285,47 @@ def compute_width(
         return WidthResult(0.0, 0.0, 0)
 
     # 6) incerteza
-    margin = (0.5 * iqr) if (use_data_driven_margin and iqr and np.isfinite(iqr) and iqr > 0) \
-            else (err_pct / 100.0) * width
+    margin = (
+        (0.5 * iqr)
+        if (use_data_driven_margin and iqr and np.isfinite(iqr) and iqr > 0)
+        else (err_pct / 100.0) * width
+    )
 
     if debug:
         try:
             debug_path = _plot_compute_width_debug(
                 sidewalk_mask=sidewalk,
                 rows_dbg=debug_rows,
-                y0=int(y0), y1=int(y1),
+                y0=int(y0),
+                y1=int(y1),
                 width=float(width),
                 margin=float(margin),
                 chosen=chosen,
                 du_lo=int(du_lo_eff),
                 du_hi=int(du_hi),
                 out_dir=debug_dir,
-                prefix=debug_prefix
+                prefix=debug_prefix,
             )
-            log("debug_plot", {"path": debug_path})
+            _swai_log("debug_plot", {"path": debug_path})
         except Exception as e:
-            log("debug_plot_error", {"error": str(e)})
+            _swai_log("debug_plot_error", {"error": str(e)})
 
-    log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
+    _swai_log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
     return WidthResult(float(width), float(margin), int(nrows))
 
 
 def _plot_compute_width_debug(
     sidewalk_mask: np.ndarray,
     rows_dbg: Sequence[_WidthDebugRow],
-    y0: int, y1: int,
-    width: float, margin: float,
+    y0: int,
+    y1: int,
+    width: float,
+    margin: float,
     chosen: str,
-    du_lo: int, du_hi: int,
+    du_lo: int,
+    du_hi: int,
     out_dir: Optional[str] = None,
-    prefix: str = "compute_width"
+    prefix: str = "compute_width",
 ) -> str:
     """
     Gera uma figura de debug mostrando:
@@ -1051,6 +1412,7 @@ def _plot_compute_width_debug(
     plt.close(fig)
     return out_path
 
+
 def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int = 6) -> np.ndarray:
     """Select bottom `percent` of True pixels in mask by y-coordinate."""
     mask_bool = np.asarray(mask) != 0
@@ -1058,7 +1420,7 @@ def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int 
     if ys.size == 0:
         return np.zeros_like(mask_bool, dtype=bool)
     th = np.percentile(ys, 100.0 - float(percent))
-    sel = (ys >= th)
+    sel = ys >= th
     if sel.sum() < min_pixels:
         return np.zeros_like(mask_bool, dtype=bool)
     out = np.zeros_like(mask_bool, dtype=bool)
@@ -1067,16 +1429,16 @@ def bottom_percent_mask(mask: np.ndarray, percent: float = 5.0, min_pixels: int 
 
 
 def compute_clearances(
-    sidewalk:   np.ndarray,                 
-    top_mask:   Tuple[float, float],          
-    bot_mask:   Tuple[float, float],          
-    obstacles:  Sequence[tuple[str, np.ndarray]],
+    sidewalk: np.ndarray,
+    top_mask: Tuple[float, float],
+    bot_mask: Tuple[float, float],
+    obstacles: Sequence[tuple[str, np.ndarray]],
     sidewalk_width_m: float,
     bottom_percent: float = 5.0,
     min_cand_pixels: int = 6,
-    return_candidates: bool = False
+    return_candidates: bool = False,
 ) -> list[ClearanceResult]:
-    
+
     results = []
     base_candidate_masks = []
     H, W = sidewalk.shape
@@ -1110,11 +1472,11 @@ def compute_clearances(
         right_idx = np.argmax(cand_u)
         L_pixel_img = (int(cand_u[left_idx]), int(cand_v[left_idx]))
         R_pixel_img = (int(cand_u[right_idx]), int(cand_v[right_idx]))
-        
+
         # Compute clearance percentages
         xL, yL = L_pixel_img
         xR, yR = R_pixel_img
-        
+
         # Calculate sidewalk edges at obstacle's y-position
         if abs(top_mask[0]) > 1e-5:
             top_x = (yL - top_mask[1]) / top_mask[0]
@@ -1167,17 +1529,20 @@ def compute_clearances(
         R_m = max(0.0, min(R_m, sidewalk_width_m))
         obs_w = max(0.0, sidewalk_width_m - (L_m + R_m))
 
-        results.append(ClearanceResult(
-            label=label,
-            L_m=L_m,
-            R_m=R_m,
-            total_m=L_m + R_m,
-            obs_width=obs_w,
-            L_pixel=L_pixel_img,
-            R_pixel=R_pixel_img
-        ))
+        results.append(
+            ClearanceResult(
+                label=label,
+                L_m=L_m,
+                R_m=R_m,
+                total_m=L_m + R_m,
+                obs_width=obs_w,
+                L_pixel=L_pixel_img,
+                R_pixel=R_pixel_img,
+            )
+        )
 
     return (results, base_candidate_masks) if return_candidates else results
+
 
 # --------------------------------------------------------------------------- #
 # 3)  Internal helpers (kept private)

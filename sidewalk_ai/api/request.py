@@ -1,6 +1,5 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import time
 from typing import Optional
 
 import os
@@ -44,6 +43,7 @@ def from_cli_args(args) -> RequestConfig:
         return_mask=getattr(args, "return_mask", False),
     )
 
+
 def from_api_single(req) -> RequestConfig:
     """Normaliza um request *single-view* para o run_pipeline."""
     return RequestConfig(
@@ -62,6 +62,7 @@ def from_api_single(req) -> RequestConfig:
         return_mask=bool(getattr(req, "return_mask", False)),
     )
 
+
 def from_api_multi(req) -> RequestConfig:
     """Normaliza um request *multi-view* para o run_pipeline."""
     return RequestConfig(
@@ -79,6 +80,7 @@ def from_api_multi(req) -> RequestConfig:
         fallback_scale=getattr(req, "fallback_scale", None),
         return_mask=bool(getattr(req, "return_mask", False)),
     )
+
 
 def run_pipeline(pipe, cfg: RequestConfig):
     """
@@ -99,8 +101,10 @@ def run_pipeline(pipe, cfg: RequestConfig):
         if cfg.lat is not None and cfg.lon is not None:
             # novo pipeline: use multi_view=True em analyse_coords
             out = pipe.analyse_coords(
-                lat=cfg.lat, lon=cfg.lon,
-                pitch=cfg.pitch, fov=cfg.fov,
+                lat=cfg.lat,
+                lon=cfg.lon,
+                pitch=cfg.pitch,
+                fov=cfg.fov,
                 multi_view=True,
             )
         elif cfg.address:
@@ -110,7 +114,7 @@ def run_pipeline(pipe, cfg: RequestConfig):
             raise ValueError("Either address or lat+lon required for multi-view")
 
         # Expect out to be (left_list, right_list) or similar. Build metadata
-        left, right = (out if isinstance(out, tuple) and len(out) == 2 else ([], []))
+        left, right = out if isinstance(out, tuple) and len(out) == 2 else ([], [])
 
         def _median_of_estimates(estimates):
             if not estimates:
@@ -120,7 +124,7 @@ def run_pipeline(pipe, cfg: RequestConfig):
             pairs = [(w, m) for (w, m) in pairs if w is not None and np.isfinite(w) and w > 0]
             if not pairs:
                 return None
-            widths  = [w for (w, m) in pairs]  # já estão filtradas
+            widths = [w for (w, m) in pairs]  # já estão filtradas
             margins = [m for (w, m) in pairs if m is not None and np.isfinite(m)]
             med_w = float(np.median(widths)) if widths else float("nan")
             med_m = float(np.median(margins)) if margins else float("nan")
@@ -167,53 +171,65 @@ def run_pipeline(pipe, cfg: RequestConfig):
         per_heading = []
         obstacle_images = []
 
-        for side_name, lst in (('left', left), ('right', right)):
+        for side_name, lst in (("left", left), ("right", right)):
             for i, est in enumerate(lst):
                 ch = {
-                    'side': side_name,
-                    'index': i,
-                    'heading_deg': getattr(est, 'heading', None),
-                    'width_m': getattr(est.width, 'width_m', None),
-                    'margin_m': getattr(est.width, 'margin_m', None),
-                    'n_clearances': len(est.clearances) if getattr(est, 'clearances', None) is not None else 0,
-                    'clearances': [
+                    "side": side_name,
+                    "index": i,
+                    "heading_deg": getattr(est, "heading", None),
+                    "width_m": getattr(est.width, "width_m", None),
+                    "margin_m": getattr(est.width, "margin_m", None),
+                    "n_clearances": (
+                        len(est.clearances) if getattr(est, "clearances", None) is not None else 0
+                    ),
+                    "clearances": [
                         {
-                            'label': c.label,
-                            'total_m': getattr(c, 'total_m', None),
-                            'obs_width': getattr(c, 'obs_width', None),
-                            'L_m': getattr(c, 'L_m', None),
-                            'R_m': getattr(c, 'R_m', None),
+                            "label": c.label,
+                            "total_m": getattr(c, "total_m", None),
+                            "obs_width": getattr(c, "obs_width", None),
+                            "L_m": getattr(c, "L_m", None),
+                            "R_m": getattr(c, "R_m", None),
                         }
-                        for c in getattr(est, 'clearances', [])
+                        for c in getattr(est, "clearances", [])
                     ],
                 }
                 per_heading.append(ch)
 
                 # If this estimate reports any clearances, produce a simple
                 # overlay image (sidewalk mask + notice) and return base64.
-                if getattr(est, 'clearances', None) and len(est.clearances) > 0:
-                    if getattr(est, 'rgb_image', None) is not None:
+                if getattr(est, "clearances", None) and len(est.clearances) > 0:
+                    if getattr(est, "rgb_image", None) is not None:
                         rgb = est.rgb_image
                         try:
                             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                             overlay = bgr.copy()
-                            mask_bool = getattr(est, 'sidewalk_mask', None)
+                            mask_bool = getattr(est, "sidewalk_mask", None)
                             if mask_bool is not None:
                                 mask_bool = mask_bool.astype(bool)
                                 overlay[mask_bool] = (0, 255, 0)
                             # draw a red header bar indicating obstacles
                             cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 24), (0, 0, 255), -1)
-                            cv2.putText(overlay, f'OBSTACLES: {len(est.clearances)}', (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
-                            obstacle_images.append(base64.b64encode(cv2.imencode('.png', overlay)[1]).decode())
+                            cv2.putText(
+                                overlay,
+                                f"OBSTACLES: {len(est.clearances)}",
+                                (6, 16),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (255, 255, 255),
+                                1,
+                            )
+                            obstacle_images.append(
+                                base64.b64encode(cv2.imencode(".png", overlay)[1]).decode()
+                            )
                         except Exception:
                             # if conversion fails, skip image
                             pass
 
         result = {
-            'results': out,
-            'metadata': meta,
-            'per_heading': per_heading,
-            'obstacle_images': obstacle_images,
+            "results": out,
+            "metadata": meta,
+            "per_heading": per_heading,
+            "obstacle_images": obstacle_images,
         }
         return result
 
@@ -221,7 +237,9 @@ def run_pipeline(pipe, cfg: RequestConfig):
     # and run the pipeline analysis on that image. This avoids the
     # multi-heading sampling performed in `analyse_coords`.
     if cfg.lat is not None and cfg.lon is not None:
-        req = ImageRequest(lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
+        req = ImageRequest(
+            lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov
+        )
         img_path = pipe.sv.fetch(req)
         return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
 

@@ -8,21 +8,21 @@ from typing import Union
 
 import cv2
 import numpy as np
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sidewalk_ai.processing.accessibility import _label_to_type
 
 # ─── color palette for known types ────────────────────────────────
 
 _PALETTE = {
-    "tree": (0,160,0),
-    "grass": (0,200,0),
-    "plant": (0,180,180),
-    "signboard": (80,80,255),
-    "step": (220,220,220),
-    "stair": (220,220,220),
-    "pole": (180,0,180),
-    "bench": (0,140,255),
+    "tree": (0, 160, 0),
+    "grass": (0, 200, 0),
+    "plant": (0, 180, 180),
+    "signboard": (80, 80, 255),
+    "step": (220, 220, 220),
+    "stair": (220, 220, 220),
+    "pole": (180, 0, 180),
+    "bench": (0, 140, 255),
 }
 
 # ─── regex for label type extraction ───────────────────────────────
@@ -31,30 +31,37 @@ _LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
 
 # ─── configuration ────────────────────────────────────────────────
 
+
 class Settings(BaseSettings):
     """Central place for image-loading defaults."""
+
+    model_config = SettingsConfigDict(env_prefix="SWAI_IMG_")
+
     auto_crop_google_logo: bool = False
-    google_bar_height_px: int   = 20          # adjust if Google changes UI
-    class Config:
-        env_prefix = "SWAI_IMG_"
+    google_bar_height_px: int = 0  # adjust if Google changes UI
 
 
 _cfg = Settings()
+
 
 def get_google_bar_height_px() -> int:
     """Return current configured height of the Google logo bar (in pixels)."""
     return int(_cfg.google_bar_height_px)
 
+
 # ─── custom exceptions ────────────────────────────────────────────
+
 
 class ImageLoadError(RuntimeError):
     """Raised when an image cannot be decoded."""
 
+
 # ─── main function ────────────────────────────────────────────────
+
 
 def read_rgb(
     src: Union[str, Path, bytes, np.ndarray],
-    *,                           # force kwargs after this
+    *,  # force kwargs after this
     crop_bar: bool | None = None,
 ) -> np.ndarray:
     """
@@ -83,20 +90,22 @@ def read_rgb(
         arr = cv2.imdecode(np.frombuffer(src, dtype=np.uint8), cv2.IMREAD_COLOR)
         if arr is None:
             raise ImageLoadError("OpenCV failed to decode in-memory bytes.")
-    else:                                         # already a NumPy array
+    else:  # already a NumPy array
         arr = src.copy()
 
     # ─── assure channel order + optional crop ─────────────────────────────
-    rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)   # idempotent if already RGB
+    rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)  # idempotent if already RGB
 
     if crop_bar and rgb.shape[0] > _cfg.google_bar_height_px:
-        rgb = rgb[:-_cfg.google_bar_height_px, :]
+        rgb = rgb[: -_cfg.google_bar_height_px, :]
 
     return rgb
 
+
 # ─── auxiliary functions ─────────────────────────────────────────────
 
-def _color_for_type(t: str) -> tuple[int,int,int]:
+
+def _color_for_type(t: str) -> tuple[int, int, int]:
     if t in _PALETTE:
         return _PALETTE[t]
     h = abs(hash(t)) & 0xFFFFFF
@@ -104,6 +113,7 @@ def _color_for_type(t: str) -> tuple[int,int,int]:
     g = 50 + ((h >> 8) & 0xFF) % 206
     b = 50 + ((h >> 16) & 0xFF) % 206
     return (int(b), int(g), int(r))  # BGR
+
 
 def objects_overlay_bgr(rgb_bgr: np.ndarray, obstacles) -> np.ndarray:
     """
@@ -123,14 +133,18 @@ def objects_overlay_bgr(rgb_bgr: np.ndarray, obstacles) -> np.ndarray:
         out[mask] = (0.6 * out[mask] + 0.4 * np.array(color)).astype(np.uint8)
         # contorno fino ajuda a “separar” objetos vizinhos
         try:
-            cnts,_ = cv2.findContours(mask.astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts, _ = cv2.findContours(
+                mask.astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
             cv2.drawContours(out, cnts, -1, color, 2)
         except Exception:
             pass
     return out
 
+
 def png_b64(arr: np.ndarray) -> str:
     return base64.b64encode(cv2.imencode(".png", arr)[1]).decode()
+
 
 def png_triplet(result):
     if getattr(result, "rgb_image", None) is None:
@@ -139,7 +153,7 @@ def png_triplet(result):
 
     # overlay calçada
     over_sw = rgb_bgr.copy()
-    over_sw[result.sidewalk_mask.astype(bool)] = (0,255,0)
+    over_sw[result.sidewalk_mask.astype(bool)] = (0, 255, 0)
     over_sw = cv2.addWeighted(over_sw, 0.4, rgb_bgr, 0.6, 0)
 
     # overlay objetos
@@ -149,11 +163,14 @@ def png_triplet(result):
         "gsv_png_b64": png_b64(rgb_bgr),
         "overlay_sidewalk_png_b64": png_b64(over_sw),
         "overlay_obstacle_png_b64": png_b64(over_obj),
-        #"width_m": float(getattr(result.width, "width_m", 0.0) or 0.0),
-        #"margin_m": float(getattr(result.width, "margin_m", 0.0) or 0.0),
+        # "width_m": float(getattr(result.width, "width_m", 0.0) or 0.0),
+        # "margin_m": float(getattr(result.width, "margin_m", 0.0) or 0.0),
     }
 
+
 def sample_indices(n, k=3):
-    if n<=0: return []
-    if n<=k: return list(range(n))
-    return sorted(set([n//4, n//2, (3*n)//4]))[:k]
+    if n <= 0:
+        return []
+    if n <= k:
+        return list(range(n))
+    return sorted(set([n // 4, n // 2, (3 * n) // 4]))[:k]

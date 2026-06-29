@@ -18,6 +18,7 @@ from typing import Any
 __all__ = [
     "SidewalkPipeline",
     "build_segmenter",
+    "build_depth",
     "MidasEstimator",
     "StreetViewClient",
     "Coordinate",
@@ -28,7 +29,6 @@ __all__ = [
 # 1)  Re-export light helpers immediately
 # ------------------------------------------------------------
 from .io.geo import Coordinate, haversine
-from .io.streetview import StreetViewClient
 
 # ------------------------------------------------------------
 # 2)  Lazy re-exports for heavy modules (Torch, Detectron2…)
@@ -36,7 +36,9 @@ from .io.streetview import StreetViewClient
 _lazy_map: dict[str, str] = {
     "SidewalkPipeline": "sidewalk_ai.core.pipeline",
     "build_segmenter": "sidewalk_ai.models.factory",
+    "build_depth": "sidewalk_ai.models.factory",
     "MidasEstimator": "sidewalk_ai.models.midas",
+    "StreetViewClient": "sidewalk_ai.io.streetview",
 }
 
 
@@ -44,6 +46,6 @@ def __getattr__(name: str) -> Any:  # PEP 562
     if name in _lazy_map:
         mod: ModuleType = import_module(_lazy_map[name])
         obj = getattr(mod, name)
-        globals()[name] = obj          # cache for next time
+        globals()[name] = obj  # cache for next time
         return obj
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

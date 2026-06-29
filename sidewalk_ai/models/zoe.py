@@ -2,26 +2,21 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np, torch
-import os
 
-_VARIANTS = {"zoed_n": "ZoeD_N",
-             "zoed_k": "ZoeD_K",
-             "zoed_nk": "ZoeD_NK"}
+from sidewalk_ai.log import debug_enabled, debug_event, get_logger
 
-# --- DEBUG HELPERS ---
-def _swai_debug_on():
-    val = os.getenv("SWAI_DEBUG", "0").lower()
-    return val not in ("0", "false", "off", "")
+_VARIANTS = {"zoed_n": "ZoeD_N", "zoed_k": "ZoeD_K", "zoed_nk": "ZoeD_NK"}
+
+logger = get_logger(__name__)
+
 
 def _swai_log(tag, payload):
-    if not _swai_debug_on():
-        return
-    try:
-        import json
-        print(f"[SWAI][{tag}] " + json.dumps(payload, ensure_ascii=False, default=str))
-    except Exception:
-        print(f"[SWAI][{tag}] {payload}")
+    if debug_enabled():
+        debug_event(logger, tag, payload)
+
+
 # ------------------------------------------------------
+
 
 class ZoeDepthEstimator:
     """
@@ -31,51 +26,60 @@ class ZoeDepthEstimator:
 
     is_metric = True
 
-    def __init__(self,
-                 variant: str = "zoed_n",
-                 device: str | None = None,
-                 source: str = "github",        # "github" | "local"
-                 repo_or_path: str | Path | None = None,
-                 ckpt_path: str | Path | None = None):
+    def __init__(
+        self,
+        variant: str = "zoed_n",
+        device: str | None = None,
+        source: str = "github",  # "github" | "local"
+        repo_or_path: str | Path | None = None,
+        ckpt_path: str | Path | None = None,
+    ):
         if variant not in _VARIANTS:
             raise ValueError(f"variant must be one of {list(_VARIANTS)}")
 
-        self.device = torch.device(device or
-                                   ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self._variant = variant  # Store for debug visualization
 
-        hub_repo = "isl-org/ZoeDepth" if source == "github" else str(
-            Path(repo_or_path or ".").resolve())
+        hub_repo = (
+            "isl-org/ZoeDepth" if source == "github" else str(Path(repo_or_path or ".").resolve())
+        )
 
         # --- build architecture only ---
-        self.model = torch.hub.load(hub_repo, _VARIANTS[variant],
-                                    source="local" if source == "local" else "github",
-                                    pretrained=True).to(self.device).eval()
+        self.model = (
+            torch.hub.load(
+                hub_repo,
+                _VARIANTS[variant],
+                source="local" if source == "local" else "github",
+                pretrained=True,
+            )
+            .to(self.device)
+            .eval()
+        )
 
         # --- load weights (official or custom) ---
-        if ckpt_path is not None:                          # user checkpoint
+        if ckpt_path is not None:  # user checkpoint
             state = torch.load(Path(ckpt_path).expanduser(), map_location="cpu")
-        else:                                              # official checkpoint → query cfg
+        else:  # official checkpoint → query cfg
             from zoedepth.utils.config import get_config
 
-            if   variant == "zoed_n":
-                cfg = get_config("zoedepth",      "infer")                 # NYU-trained
+            if variant == "zoed_n":
+                cfg = get_config("zoedepth", "infer")  # NYU-trained
             elif variant == "zoed_k":
-                cfg = get_config("zoedepth",      "infer", config_version="kitti")
+                cfg = get_config("zoedepth", "infer", config_version="kitti")
             else:  # "zoed_nk"
-                cfg = get_config("zoedepth_nk",   "infer")
+                cfg = get_config("zoedepth_nk", "infer")
 
             res = cfg.pretrained_resource
             url = res["url"] if isinstance(res, dict) else res
-            url = url.split("url::", 1)[-1]          # strip prefix if present
+            url = url.split("url::", 1)[-1]  # strip prefix if present
 
-            state = torch.hub.load_state_dict_from_url(
-                url, map_location="cpu", progress=True)
+            state = torch.hub.load_state_dict_from_url(url, map_location="cpu", progress=True)
 
-        self.model.load_state_dict(state, strict=False)    # ignore extra keys
+        self.model.load_state_dict(state, strict=False)  # ignore extra keys
 
         # keep a lightweight handle to the helper only after weights are ok
         from zoedepth.utils.misc import pil_to_batched_tensor
+
         self._pil_to_batched = pil_to_batched_tensor
 
     # ----------------------------------------------------------------
@@ -88,19 +92,19 @@ class ZoeDepthEstimator:
 
         # Convert to PIL Image
         pil_img = Image.fromarray(img_rgb)
-        
+
         # Convert to batched tensor
         bat = self._pil_to_batched(pil_img).to(self.device)
-        
+
         # Inference with proper error handling
         with torch.no_grad():
-            out = self.model.infer(bat)               # UMA chamada
+            out = self.model.infer(bat)  # UMA chamada
             # Alguns variantes retornam dict com 'metric_depth'
             if isinstance(out, dict):
-                depth = out.get('metric_depth', out.get('depth', None))
+                depth = out.get("metric_depth", out.get("depth", None))
                 if depth is None:
                     # Se só veio 'inv_depth' (raro), inverta UMA vez aqui
-                    inv = out.get('inv_depth', None)
+                    inv = out.get("inv_depth", None)
                     if inv is None:
                         raise RuntimeError("ZoeDepth returned unexpected dict keys")
                     depth = 1.0 / (inv + 1e-8)
@@ -121,11 +125,14 @@ class ZoeDepthEstimator:
         depth = np.clip(depth, 0.1, 100.0)
         depth = np.nan_to_num(depth, nan=5.0, posinf=100.0, neginf=0.1)
 
-        #(opcional) log:
-        _swai_log("zoe", {
-            "variant": self._variant,
-            "depth_min": float(depth.min()),
-            "depth_med": float(np.median(depth)),
-            "depth_max": float(depth.max())
-        })
+        # (opcional) log:
+        _swai_log(
+            "zoe",
+            {
+                "variant": self._variant,
+                "depth_min": float(depth.min()),
+                "depth_med": float(np.median(depth)),
+                "depth_max": float(depth.max()),
+            },
+        )
         return depth

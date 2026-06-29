@@ -1,6 +1,5 @@
 # sidewalk_ai/models/ensemble.py
 from __future__ import annotations
-import numpy as np
 from typing import Literal
 
 from .base import Segmenter

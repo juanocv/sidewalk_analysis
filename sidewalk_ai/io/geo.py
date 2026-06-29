@@ -5,6 +5,7 @@ Light-weight geographic helpers (no external deps).
 The module is **pure**: it never prints, reads, or writes files and is
 fully covered by type hints—so you can unit-test everything in < 1 ms.
 """
+
 from __future__ import annotations
 
 import math
@@ -23,12 +24,13 @@ __all__ = [
 # 0)  Constants / dataclasses                                                 #
 # --------------------------------------------------------------------------- #
 
-EARTH_RADIUS_M: float = 6_371_000.0           # IUGG mean Earth radius (metres)
+EARTH_RADIUS_M: float = 6_371_000.0  # IUGG mean Earth radius (metres)
 
 
 @dataclass(frozen=True, slots=True)
 class Coordinate:
     """Immutable (lat, lon) pair in *decimal degrees*."""
+
     lat: float
     lon: float
 
@@ -41,8 +43,10 @@ class Coordinate:
 # 1)  Core helpers                                                            #
 # --------------------------------------------------------------------------- #
 
-def haversine(a: Union[Coordinate, Tuple[float, float]],
-              b: Union[Coordinate, Tuple[float, float]]) -> float:
+
+def haversine(
+    a: Union[Coordinate, Tuple[float, float]], b: Union[Coordinate, Tuple[float, float]]
+) -> float:
     """
     Fast great-circle distance in **metres** (error <1 m up to 200 km).
 
@@ -57,8 +61,8 @@ def haversine(a: Union[Coordinate, Tuple[float, float]],
     lat2, lon2 = b if isinstance(b, tuple) else (b.lat, b.lon)
 
     φ1, φ2 = map(math.radians, (lat1, lat2))
-    Δφ     = math.radians(lat2 - lat1)
-    Δλ     = math.radians(lon2 - lon1)
+    Δφ = math.radians(lat2 - lat1)
+    Δλ = math.radians(lon2 - lon1)
 
     s = math.sin(Δφ * 0.5)
     c = math.sin(Δλ * 0.5)
@@ -116,9 +120,7 @@ def destination(
     φ1 = math.radians(origin.lat)
     λ1 = math.radians(origin.lon)
 
-    φ2 = math.asin(
-        math.sin(φ1) * math.cos(d) + math.cos(φ1) * math.sin(d) * math.cos(θ)
-    )
+    φ2 = math.asin(math.sin(φ1) * math.cos(d) + math.cos(φ1) * math.sin(d) * math.cos(θ))
     λ2 = λ1 + math.atan2(
         math.sin(θ) * math.sin(d) * math.cos(φ1),
         math.cos(d) - math.sin(φ1) * math.sin(φ2),

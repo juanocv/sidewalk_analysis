@@ -9,23 +9,30 @@ from typing import Optional
 
 import requests
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from joblib import Memory
+
+from sidewalk_ai.log import get_logger
+
+logger = get_logger(__name__)
 
 # --------------------------------------------------------------------------- #
 # 1)  Settings – central place for API key, cache size, paths, default params
 # --------------------------------------------------------------------------- #
 
+
 class Settings(BaseSettings):
-    google_api_key: str = Field(..., env="GOOGLE_API_KEY")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        populate_by_name=True,
+    )
+
+    google_api_key: str | None = Field(default=None, validation_alias="GOOGLE_API_KEY")
     cache_dir: Path = Path.home() / ".sidewalk_ai" / "cache" / "streetview"
     default_fov: int = 90  # 0 = auto, 90 = default
     default_size: str = "600x400"
     timeout_s: int = 10
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 cfg = Settings()
@@ -33,6 +40,7 @@ cfg = Settings()
 # --------------------------------------------------------------------------- #
 # 2)  Request “DTO” – keeps the public API explicit and typed
 # --------------------------------------------------------------------------- #
+
 
 @dataclass(frozen=True, slots=True)
 class ImageRequest:
@@ -48,6 +56,7 @@ class ImageRequest:
 # 3)  Street View client – thin I/O layer, **no business logic**
 # --------------------------------------------------------------------------- #
 
+
 class StreetViewClient:
     """
     Fetch Google Street View images + metadata with local on-disk caching.
@@ -61,7 +70,7 @@ class StreetViewClient:
 
     _BASE = "https://maps.googleapis.com/maps/api/streetview"
     _META = "https://maps.googleapis.com/maps/api/streetview/metadata"
-    _GEO  = "https://maps.googleapis.com/maps/api/geocode/json"
+    _GEO = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def __init__(
         self,
@@ -72,7 +81,8 @@ class StreetViewClient:
         self.settings = settings
         self.cache = Memory(location=cache_dir or settings.cache_dir, compress=True)
         self.session = session or requests.Session()
-        self.session.params = {"key": settings.google_api_key}
+        if settings.google_api_key:
+            self.session.params = {"key": settings.google_api_key}
         self.session.headers.update({"User-Agent": "sidewalk-ai/0.1"})
         os.makedirs(self.cache.location, exist_ok=True)
 
@@ -106,6 +116,7 @@ class StreetViewClient:
         local_path = self.cache.location / filename
 
         if local_path.exists():
+            logger.debug("Street View cache hit: %s", local_path)
             return local_path
 
         params = {
@@ -125,7 +136,7 @@ class StreetViewClient:
 
     # ------------------------- metadata lookup ------------------------------ #
 
-    #@Memory.cache(ignore=["self"], verbose=0)
+    # @Memory.cache(ignore=["self"], verbose=0)
     def metadata(self, lat: float, lon: float) -> dict:
         """Cached call – Google’s quota counts metadata requests as well."""
         resp = self._get(self._META, params={"location": f"{lat},{lon}"})
@@ -134,6 +145,11 @@ class StreetViewClient:
     # ------------------------- private helpers ------------------------------ #
 
     def _get(self, url: str, params: dict) -> requests.Response:
+        if not self.session.params.get("key"):
+            raise RuntimeError(
+                "GOOGLE_API_KEY is required for Street View API calls. "
+                "Set it in the environment or in a local .env file."
+            )
         start = time.perf_counter()
         resp = self.session.get(url, params=params, timeout=self.settings.timeout_s)
         try:
@@ -143,7 +159,6 @@ class StreetViewClient:
             raise RuntimeError(f"Street View API error: {msg or resp.text}") from None
         finally:
             # report elapsed time in seconds (more human-friendly)
-            elapsed_s = (time.perf_counter() - start)
-            # You may plug a proper logger here
-            print(f"[streetview] GET {url.split('/')[-1]} – {elapsed_s:0.4f} s")
+            elapsed_s = time.perf_counter() - start
+            logger.info("Street View GET %s took %.4f seconds", url.split("/")[-1], elapsed_s)
         return resp

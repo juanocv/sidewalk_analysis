@@ -1,13 +1,16 @@
 # sidewalk_ai/models/factory.py
 from __future__ import annotations
 from typing import Any, Literal
+
 # ─── segmentation back-ends ────────────────────────────────────────
 from .detectron2 import Detectron2Segmenter
-from .oneformer  import OneFormerSegmenter
-from .deeplab    import DeepLabSegmenter, load_deeplab_checkpoint
+from .oneformer import OneFormerSegmenter
+from .deeplab import DeepLabSegmenter, load_deeplab_checkpoint
+
 # ─── depth back-ends ───────────────────────────────────────────────
 from .midas import MidasEstimator
-from .zoe   import ZoeDepthEstimator          
+from .zoe import ZoeDepthEstimator
+
 
 # ------------------------------------------------------------------ #
 #  SEGMENTER  FACTORY                                                #
@@ -24,8 +27,7 @@ def build_segmenter(
         ckpt = kwargs.pop("ckpt_path")
 
         # ── kwargs meant for the *loader* ───────────────────────────
-        loader_keys = {"model_name", "num_classes",
-                       "output_stride", "allow_pickle"}
+        loader_keys = {"model_name", "num_classes", "output_stride", "allow_pickle"}
         loader_kwargs = {k: kwargs.pop(k) for k in loader_keys if k in kwargs}
 
         dl = load_deeplab_checkpoint(ckpt, **loader_kwargs)
@@ -33,6 +35,7 @@ def build_segmenter(
         # remaining kwargs (e.g. sidewalk_class_id, device) go to Segmenter
         return DeepLabSegmenter(dl, **kwargs)
     raise ValueError(f"Unknown backend: {backend}")
+
 
 # ------------------------------------------------------------------ #
 #  DEPTH  FACTORY                                                    #
@@ -45,7 +48,7 @@ def build_depth(
     """
     Returns a depth-estimator instance with a `.predict(np.uint8 H×W×3)` method
     compatible with the rest of the pipeline.
-    
+
     Parameters
     ----------
     backend : str
@@ -62,7 +65,7 @@ def build_depth(
     if backend == "zoe":
         # Pass variant to ZoeDepth if provided
         if variant is not None:
-            kwargs['variant'] = variant
+            kwargs["variant"] = variant
         return ZoeDepthEstimator(**kwargs)
 
     raise ValueError(f"Unknown depth backend: {backend}")
