@@ -1,42 +1,108 @@
 # sidewalk_ai/models/ensemble.py
 from __future__ import annotations
-from typing import Literal
 
-from .base import Segmenter
+from typing import Literal, Sequence
+
+import numpy as np
+
+from sidewalk_ai.processing.fusion import logical_fuse
+
+from .base import Segmenter, SegmentInfo
+
+FuseMethod = Literal["or", "and", "majority"]
+_METHODS: tuple[str, ...] = ("or", "and", "majority")
+
+_SegmenterOutput = tuple[np.ndarray, np.ndarray | None, list[SegmentInfo] | None, list]
 
 
 class EnsembleSegmenter(Segmenter):
     """
-    Combine **any two** Segmenters with “or” / “and” fusion.
+    Combine two or more Segmenters into one.
+
+    Only the **sidewalk mask** is fused, through
+    :func:`~sidewalk_ai.processing.fusion.logical_fuse`, so all three fusion
+    rules ("or", "and", "majority") are available.
+
+    The panoptic map is *not* fusable: segment ids come from unrelated label
+    spaces per back-end. The map of the first member that supplies one is
+    passed through instead, which keeps obstacle extraction working — the
+    pipeline intersects those segments with the fused sidewalk mask, so the
+    ensemble still decides *where* the sidewalk is.
+
+    Note that ``"majority"`` only differs from ``"and"`` with three or more
+    members: across two masks a strict majority already requires both to agree.
     """
 
-    def __init__(
-        self,
-        seg1: Segmenter,
-        seg2: Segmenter,
-        *,
-        method: Literal["or", "and"] = "or",
-    ):
-        self.a = seg1
-        self.b = seg2
-        if method not in {"or", "and"}:
-            raise ValueError("method must be 'or' or 'and'")
+    def __init__(self, *segmenters: Segmenter, method: FuseMethod = "or") -> None:
+        members = list(segmenters)
+        if len(members) < 2:
+            raise ValueError("EnsembleSegmenter needs at least two segmenters")
+        if method not in _METHODS:
+            raise ValueError(f"method must be one of {', '.join(_METHODS)}; got {method!r}")
+        self.members = members
         self.method = method
 
     def segment(self, img_rgb, target_label="sidewalk", *, device=None):
-        out1 = self.a.segment(img_rgb, target_label)
-        out2 = self.b.segment(img_rgb, target_label)
-        # normalize to (mask, seg_map, seg_info, obstacles)
-        if len(out1) == 3:
-            m1, sm1, si1 = out1
-            obs1 = []
-        else:
-            m1, sm1, si1, obs1 = out1
-        if len(out2) == 3:
-            m2, sm2, si2 = out2
-            obs2 = []
-        else:
-            m2, sm2, si2, obs2 = out2
-        fuse = m1 | m2 if self.method == "or" else m1 & m2
-        # we don't have a meaningful seg_map/seg_info for the fused result
-        return fuse, None, None, []
+        outputs = [_normalise(m.segment(img_rgb, target_label)) for m in self.members]
+
+        fused = logical_fuse([out[0] for out in outputs], method=self.method).astype(bool)
+
+        seg_map, seg_info = _first_panoptic(outputs, fused.shape)
+
+        # With a panoptic map available the pipeline rebuilds obstacles from it
+        # and ignores this list, so only bother when there is none.
+        obstacles = [] if seg_map is not None else _merge_obstacles(outputs, fused)
+
+        return fused, seg_map, seg_info, obstacles
+
+
+def _normalise(out: Sequence) -> _SegmenterOutput:
+    """Accept both the 3-tuple and 4-tuple shapes back-ends return."""
+    if len(out) == 3:
+        mask, seg_map, seg_info = out
+        return mask, seg_map, seg_info, []
+    if len(out) == 4:
+        mask, seg_map, seg_info, obstacles = out
+        return mask, seg_map, seg_info, list(obstacles or [])
+    raise TypeError(f"Segmenter returned {len(out)} values; expected 3 or 4")
+
+
+def _first_panoptic(
+    outputs: Sequence[_SegmenterOutput],
+    shape: tuple[int, ...],
+) -> tuple[np.ndarray | None, list[SegmentInfo] | None]:
+    """
+    Panoptic map of the first member that has one matching the fused shape.
+
+    A member whose map is a different size was resized during fusion, so its
+    segment ids would no longer line up with the fused mask; skip it rather
+    than emit a misaligned map.
+    """
+    for _, seg_map, seg_info, _ in outputs:
+        if seg_map is None or seg_info is None:
+            continue
+        if tuple(np.shape(seg_map)[:2]) != tuple(shape):
+            continue
+        return seg_map, seg_info
+    return None, None
+
+
+def _merge_obstacles(
+    outputs: Sequence[_SegmenterOutput],
+    fused: np.ndarray,
+) -> list[tuple[str, np.ndarray]]:
+    """
+    Pool the members' own obstacle lists, keeping those that touch the fused
+    sidewalk. Used only when no member exposes a panoptic map; two members may
+    report the same physical object, so counts from this path are upper bounds.
+    """
+    merged: list[tuple[str, np.ndarray]] = []
+    for _, _, _, obstacles in outputs:
+        for label, mask in obstacles:
+            m = np.asarray(mask).astype(bool)
+            if m.shape != fused.shape:
+                continue
+            if not (m & fused).any():
+                continue
+            merged.append((label, m))
+    return merged

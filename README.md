@@ -63,10 +63,13 @@ For backend-specific Windows/CUDA guidance, diagnostics, and logging setup, see
 
 ## Running
 
+The editable install exposes a `sidewalk-ai` console script; `python -m sidewalk_ai.cli.play`
+runs the same entry point if you prefer not to rely on the installed script.
+
 Single image:
 
 ```powershell
-python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg --single-view --device cpu
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg --single-view --device cpu
 ```
 
 This default command uses `--seg oneformer --depth zoe`, which requires the optional ML layer and
@@ -76,16 +79,46 @@ dependencies.
 Coordinates:
 
 ```powershell
-python -m sidewalk_ai.cli.play --lat -23.678479 --lon -46.559621 --multi-view --device cuda
+sidewalk-ai --lat -23.678479 --lon -46.559621 --multi-view --device cuda
 ```
 
 Address:
 
 ```powershell
-python -m sidewalk_ai.cli.play "Av. Paulista 1578, Sao Paulo" --multi-view --device cuda
+sidewalk-ai "Av. Paulista 1578, Sao Paulo" --multi-view --device cuda
 ```
 
 Use `--debug --outdir debug_out` to write diagnostic images.
+
+Pipeline knobs worth knowing:
+
+- `--seg a+b+c` runs an ensemble; `--ensemble-method or|and|majority` picks the fusion rule.
+  Only the sidewalk mask is fused — obstacles come from the panoptic map of the first member
+  that provides one, intersected with the fused mask. `majority` needs three or more members
+  to differ from `and`.
+- `--no-refine` feeds the raw segmenter mask downstream instead of the refined one.
+- `--fallback-scale` / `--force-fallback` control how a *relative* depth back-end
+  (MiDaS) is converted to metres. They have no effect with `--depth zoe`, which is
+  already metric. See [`docs/reproducibility.md`](docs/reproducibility.md#metric-scale-for-relative-depth-back-ends).
+
+## Web API
+
+The same pipeline is exposed over HTTP for integration with external systems:
+
+```powershell
+python -m pip install -e ".[api,ml]"
+uvicorn sidewalk_ai.webapi:app --host 127.0.0.1 --port 8000
+```
+
+`POST /analyse/single` and `POST /analyse/multi` return width, clearances and the
+NBR 9050 accessibility rating; `GET /ping` is a liveness probe. Interactive schema
+docs are served at `/docs`.
+
+The API has no authentication and calls a paid Google API on every request — keep
+it behind a proxy or bound to localhost. See [`docs/webapi.md`](docs/webapi.md)
+for endpoints, configuration, and the concurrency model.
+
+## Diagnostics
 
 Runtime diagnostics:
 
@@ -97,7 +130,7 @@ python -m sidewalk_ai.diagnostics --json
 Structured logs:
 
 ```powershell
-python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg `
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg `
   --single-view --device cpu --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
 ```
 
@@ -116,8 +149,19 @@ Windows helper:
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
 
-The default tests are unit-level and should not download models, call Google APIs, or require a GPU.
-Heavy model checks should be added as explicit integration tests with `gpu` or `network` markers.
+These same four checks run in CI on Linux for Python 3.11 and 3.13
+(`.github/workflows/checks.yml`).
+
+The default suite is unit-level: it never downloads models, calls Google APIs, or needs a GPU.
+That is enforced, not just documented — `pyproject.toml` deselects the `gpu` and `network`
+markers by default. Run the excluded checks deliberately:
+
+```powershell
+python -m pytest -m gpu
+python -m pytest -m network
+```
+
+Add new heavyweight checks with one of those markers so they stay out of the default run.
 
 ## Version-Control Hygiene
 

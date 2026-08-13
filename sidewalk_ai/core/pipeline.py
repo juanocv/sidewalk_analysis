@@ -19,6 +19,7 @@ from sidewalk_ai.processing.geometry import (
     _has_two_curbs,
     compute_width,
     compute_clearances,
+    to_metric_depth,
 )
 from sidewalk_ai.processing.fusion import logical_fuse
 from sidewalk_ai.models.base import Segmenter
@@ -32,7 +33,7 @@ try:
 
     _LOGO_BAR_PX = int(_swai_get_bar_height())
 except Exception:
-    # fallback silencioso para manter compatibilidade se o helper nǜo existir
+    # fallback silencioso para manter compatibilidade se o helper nao existir
     pass
 
 
@@ -46,7 +47,9 @@ WIDTH_PARAMS = {
     "use_data_driven_margin": True,
     "bottom_ignore_px": _LOGO_BAR_PX,  # ignora a faixa com a logo
     # debug output
-    "debug_dir": Path(__file__).parent.parent.parent / "debug_out",
+    # Relative to the working directory, matching the CLI's --outdir default.
+    # An absolute path built from __file__ would write inside site-packages.
+    "debug_dir": Path("debug_out"),
     "debug_prefix": "frame_",
 }
 
@@ -55,12 +58,34 @@ WIDTH_PARAMS = {
 # 0)  Public result dataclass                                                 #
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True, frozen=True)
+class DepthScale:
+    """
+    How to turn a non-metric depth map into metres.
+
+    Only consulted for back-ends whose ``is_metric`` is False (MiDaS and
+    friends); ZoeDepth already reports metres and is passed through untouched.
+
+    fallback_scale
+        Constant metres-per-unit used when the ground-plane fit finds too
+        little support. ``None`` means "no fallback": the depth path is then
+        dropped for that frame rather than reported in an arbitrary unit.
+    force_fallback
+        Skip the ground-plane fit entirely and always use *fallback_scale*.
+    """
+
+    fallback_scale: float | None = None
+    force_fallback: bool = False
+
+
+@dataclass(slots=True, frozen=True)
 class Result:
     """What the caller gets back from `SidewalkPipeline`."""
 
     width: WidthResult
     clearances: Sequence[ClearanceResult]
-    sidewalk_mask: np.ndarray  # H×W  uint8  (0/1)
+    sidewalk_mask: np.ndarray  # H×W  uint8  (0/1) – raw segmenter output
+    # Mask actually used downstream (obstacle extraction). Equal to
+    # ``sidewalk_mask`` when the pipeline was built with ``refine=False``.
     refined_mask: np.ndarray | None = None  # H×W  uint8  (0/1)
     seg_map: np.ndarray | None = None  # panoptic id map (optional)
     seg_info: list | None = None  # list of SegmentInfo tuples (id,name)
@@ -96,6 +121,10 @@ class SidewalkPipeline:
         If `segmenter.segment()` returns *multiple* candidate masks you can
         pass them as an iterable to `logical_fuse()` via this parameter.  For
         normal single-mask back-ends leave it on "none".
+    depth_scale
+        Default :class:`DepthScale` for non-metric depth back-ends.  Every
+        ``analyse_*`` method accepts a per-call override, so a server can serve
+        different settings per request without touching shared state.
     """
 
     def __init__(
@@ -107,7 +136,8 @@ class SidewalkPipeline:
         refine: bool = True,
         args=None,
         fuse_method: str | None = None,
-        initial_time: float = None,
+        initial_time: float | None = None,
+        depth_scale: DepthScale | None = None,
     ) -> None:
         self.segmenter = segmenter
         self.depth_est = depth
@@ -116,6 +146,7 @@ class SidewalkPipeline:
         self.refine = refine
         self.fuse_method = fuse_method
         self.initial_time = initial_time
+        self.depth_scale = depth_scale or DepthScale()
 
     # ------------------------------------------------------------------ #
     # Depth helper                                                       #
@@ -151,7 +182,7 @@ class SidewalkPipeline:
         if core_img is img_rgb or bar <= 0 or H <= bar:
             return depth_core
 
-        # Com recorte: remonta um mapa H�-W, deixando a faixa da logo como NaN.
+        # Com recorte: remonta um mapa HxW, deixando a faixa da logo como NaN.
         depth_full = np.full((H, W), np.nan, dtype=np.float32)
         h_core, w_core = depth_core.shape[:2]
         depth_full[:h_core, :w_core] = depth_core
@@ -167,7 +198,8 @@ class SidewalkPipeline:
         heading: int | None = None,
         pitch: int = 0,
         fov: int = 90,
-        initial_time: float = None,
+        initial_time: float | None = None,
+        depth_scale: DepthScale | None = None,
     ) -> Result:
         """
         Single-view por endereço. Se heading não for dado, tenta achar o centro
@@ -186,6 +218,31 @@ class SidewalkPipeline:
             fov=fov,
             heading=int(heading),
             initial_time=initial_time or time.time(),
+            depth_scale=depth_scale,
+        )
+
+    def analyse_image(
+        self,
+        img_path: Path | str,
+        *,
+        pitch: int = 0,
+        fov: int = 90,
+        heading: int | None = None,
+        depth_scale: DepthScale | None = None,
+    ) -> Result:
+        """
+        Analyse an image that is already on disk, skipping Street View entirely.
+
+        Use this for local files and for frames a caller fetched itself; *pitch*
+        and *fov* must describe how the image was captured, since the width
+        geometry depends on the horizon they imply.
+        """
+        return self._analyse_path(
+            Path(img_path),
+            pitch=pitch,
+            fov=fov,
+            heading=heading,
+            depth_scale=depth_scale,
         )
 
     def _analyse_heading_series(
@@ -197,6 +254,7 @@ class SidewalkPipeline:
         side_label: str,
         pitch: int,
         fov: int,
+        depth_scale: DepthScale | None = None,
     ) -> list[Result]:
         """Analyse a list of headings for one sidewalk side."""
         estimates: list[Result] = []
@@ -214,6 +272,7 @@ class SidewalkPipeline:
                         fov=fov,
                         heading=heading,
                         initial_time=time.time(),
+                        depth_scale=depth_scale,
                     )
                 )
             except RefinementError as exc:
@@ -228,6 +287,7 @@ class SidewalkPipeline:
         pitch: int = 0,
         fov: int = 90,
         max_per_side: int = 4,  # limite prático p/ tempo de execução
+        depth_scale: DepthScale | None = None,
     ) -> tuple[list["Result"], list["Result"]]:
         """
         Multi-view por endereço: amostra ângulos à esquerda/direita do centro.
@@ -249,6 +309,7 @@ class SidewalkPipeline:
             side_label="left",
             pitch=pitch,
             fov=fov,
+            depth_scale=depth_scale,
         )
         right_estimates = self._analyse_heading_series(
             lat=lat,
@@ -257,6 +318,7 @@ class SidewalkPipeline:
             side_label="right",
             pitch=pitch,
             fov=fov,
+            depth_scale=depth_scale,
         )
 
         return left_estimates, right_estimates
@@ -271,6 +333,7 @@ class SidewalkPipeline:
         *,
         multi_view: bool = False,
         max_per_side: int = 4,  # novo knob
+        depth_scale: DepthScale | None = None,
     ) -> Result | tuple[list["Result"], list["Result"]]:
         if not multi_view:
             use_heading = heading
@@ -285,6 +348,7 @@ class SidewalkPipeline:
                 fov=fov,
                 heading=int(use_heading),
                 initial_time=time.time(),
+                depth_scale=depth_scale,
             )
 
         center_heading = self._find_street_center(lat=lat, lon=lon, pitch=pitch, fov=fov)
@@ -302,6 +366,7 @@ class SidewalkPipeline:
             side_label="left",
             pitch=pitch,
             fov=fov,
+            depth_scale=depth_scale,
         )
         right_estimates = self._analyse_heading_series(
             lat=lat,
@@ -310,6 +375,7 @@ class SidewalkPipeline:
             side_label="right",
             pitch=pitch,
             fov=fov,
+            depth_scale=depth_scale,
         )
 
         return left_estimates, right_estimates
@@ -491,7 +557,8 @@ class SidewalkPipeline:
         pitch: int = 0,
         fov: int = 90,
         heading: int | None = None,
-        initial_time: float = None,
+        initial_time: float | None = None,
+        depth_scale: DepthScale | None = None,
     ) -> Result:
         if initial_time is None:
             initial_time = self.initial_time
@@ -503,12 +570,16 @@ class SidewalkPipeline:
         obstacles = []
         out = self.segmenter.segment(img_rgb)
         if len(out) == 3:
-            sidewalk_mask, seg_map, seg_info = out  # for either detectron2 or oneformer
+            sidewalk_mask, seg_map, seg_info = out  # detectron2, oneformer
         elif len(out) == 4:
-            sidewalk_mask, seg_map, seg_info, obstacles = out  # for deeplab
-
-        # print(f"Segmentation map {seg_map}")
-        # print(f"Segmentation info {seg_info}")
+            sidewalk_mask, seg_map, seg_info, obstacles = out  # deeplab, ensemble
+        else:
+            # Falling through used to leave every name below unbound, so the
+            # real failure surfaced 20 lines later as a confusing NameError.
+            raise TypeError(
+                f"{type(self.segmenter).__name__}.segment() returned {len(out)} values; "
+                "expected (mask, seg_map, seg_info) or (mask, seg_map, seg_info, obstacles)"
+            )
 
         # Some back-ends (ensemble) may return a tuple of masks
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
@@ -517,8 +588,17 @@ class SidewalkPipeline:
         logger.info("Segmentation took %.4f seconds", time.time() - initial_time)
 
         # -------- Mask Refinement -------- #
-        refined_mask, (edge_top, edge_bot) = refine_sidewalk_mask(sidewalk_mask)
-        logger.info("Mask refinement took %.4f seconds", time.time() - initial_time)
+        # The fitted curb lines are no longer consumed here: clearances now read
+        # the sidewalk span directly from the mask (see compute_clearances).
+        if self.refine:
+            refined_mask, _curb_lines = refine_sidewalk_mask(sidewalk_mask)
+            logger.info("Mask refinement took %.4f seconds", time.time() - initial_time)
+        else:
+            # refine=False keeps the raw segmenter mask downstream. Note this
+            # also disables the RefinementError path that lets multi-view skip
+            # unusable headings.
+            refined_mask = np.asarray(sidewalk_mask).astype(np.uint8)
+            logger.debug("Mask refinement disabled (refine=False)")
 
         # -------- Obstacle Extraction (base-only) -------- #
         # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
@@ -532,9 +612,29 @@ class SidewalkPipeline:
         depth_map = self._predict_depth_without_logo(img_rgb)
 
         metric = getattr(self.depth_est, "is_metric", False)
+        if not metric:
+            # Relative back-ends are only defined up to a factor; compute_width
+            # reads the map as metres, so recover that factor first.
+            scale_cfg = depth_scale or self.depth_scale
+            depth_map, alpha, alpha_source = to_metric_depth(
+                depth_map,
+                sidewalk_mask,
+                fov_deg=fov,
+                fallback_scale=scale_cfg.fallback_scale,
+                force_fallback=scale_cfg.force_fallback,
+            )
+            if alpha is None:
+                logger.warning(
+                    "No metric scale for a non-metric depth back-end; "
+                    "dropping the depth path for this frame "
+                    "(set --fallback-scale to keep it)"
+                )
+                depth_map = None
+            else:
+                logger.debug("Metric scale alpha=%.5f (source=%s)", alpha, alpha_source)
+
         m_cov = float(sidewalk_mask.mean())
-        valid_depth = np.isfinite(depth_map)
-        if valid_depth.any():
+        if depth_map is not None and np.isfinite(depth_map).any():
             d_min = float(np.nanmin(depth_map))
             d_med = float(np.nanmedian(depth_map))
             d_max = float(np.nanmax(depth_map))
@@ -595,8 +695,6 @@ class SidewalkPipeline:
         clearances = compute_clearances(
             sidewalk_mask,
             obstacles=obstacles,
-            top_mask=edge_top,
-            bot_mask=edge_bot,
             sidewalk_width_m=width_res.width_m,
             return_candidates=False,
         )
@@ -604,8 +702,10 @@ class SidewalkPipeline:
         logger.info("Clearance estimation took %.4f seconds", time.time() - initial_time)
 
         # -------- Return Result --------------------------------------- #
-        self._last_rgb = img_rgb  # for debugging
-
+        # The RGB frame travels on the Result rather than on the pipeline: a
+        # `self._last_rgb` here is shared mutable state, and the API serves many
+        # requests from one pipeline instance. The CLI sets it explicitly when
+        # the debug sheet needs a fallback.
         return Result(
             width=width_res,
             clearances=clearances,

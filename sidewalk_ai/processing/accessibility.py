@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Iterable
 import numpy as np
-import re
 import os
+
+from sidewalk_ai.labels import label_to_type
 
 
 # ------------------------- helpers públicos -------------------------
@@ -99,13 +100,7 @@ def _robust_stats(vals: Iterable[float]) -> Dict[str, float]:
     )
 
 
-_LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
-
-
-def _label_to_type(label: str) -> str:
-    # "tree#4:base2" -> "tree"
-    m = _LABEL_TYPE_RE.match(label)
-    return m.group(1).strip().lower() if m else label.lower()
+_label_to_type = label_to_type  # retrocompatibilidade
 
 
 # ------------------------- schemas -------------------------
@@ -185,15 +180,19 @@ class AccessibilityMetrics:
 
 # ------------------------- core -------------------------
 
-# fator do limiar intermediário (padrão 75% do threshold); pode ser ajustado por ENV
-_MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
+# Fator do limiar intermediário, como fração do threshold.
+# Ajustável por ENV (SWAI_RANK_MID_RATIO); padrão 0.50, ou seja, 0.60 m para o
+# threshold de 1.20 m da NBR 9050.
+_MID_RATIO_DEFAULT = 0.50
+MID_RATIO = float(os.getenv("SWAI_RANK_MID_RATIO", str(_MID_RATIO_DEFAULT)))
+_MID_RATIO = MID_RATIO  # retrocompatibilidade para chamadores existentes
 
 
 def _rating_rank_by_threshold(median_corridor_m: float, threshold_m: float = 1.20) -> str:
     """
     Ranking simples baseado na mediana do corredor (pool L∪R):
       - III (Ideal):      mediana ≥ threshold
-      - II (Razoável):    mediana ≥ _MID_RATIO * threshold  (padrão: 0.75 * threshold)
+      - II (Razoável):    mediana ≥ _MID_RATIO * threshold  (padrão: 0.50 * threshold)
       - I  (Ruim):        caso contrário
     """
     if np.isnan(median_corridor_m):

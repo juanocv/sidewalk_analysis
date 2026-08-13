@@ -9,15 +9,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seg",
         default="oneformer",
-        help="Single back-end or TWO separated by a plus: "
+        help="One back-end, or several joined by a plus: "
         "'oneformer', 'detectron2', 'deeplab', "
-        "or e.g. 'oneformer+detectron2'",
+        "or e.g. 'oneformer+detectron2+deeplab'",
     )
     parser.add_argument(
         "--ensemble-method",
         default="or",
         choices=["or", "and", "majority"],
-        help="Fusion rule when two back-ends are given",
+        help="Fusion rule when several back-ends are given. "
+        "'majority' needs at least three to differ from 'and'.",
     )
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--ckpt", help="Path to DeepLab checkpoint (.pth)")
@@ -35,16 +36,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="ZoeDepth model size",
     )
     parser.add_argument(
+        "--refine",
+        dest="refine",
+        action="store_true",
+        help="Apply mask refinement before obstacle extraction (default)",
+    )
+    parser.add_argument(
+        "--no-refine",
+        dest="refine",
+        action="store_false",
+        help="Feed the raw segmenter mask downstream, skipping refinement",
+    )
+    parser.set_defaults(refine=True)
+    parser.add_argument(
         "--force-fallback",
         action="store_true",
-        help="Ignore ground-plane fit; always use fallback scale",
+        help="Ignore ground-plane fit; always use fallback scale. "
+        "Only affects non-metric depth back-ends such as MiDaS.",
     )
     parser.add_argument(
         "--fallback-scale",
         type=float,
         default=0.075,
-        help="Constant metres-per-unit when ground-plane fit "
-        "fails (default 0.075 for 600×400 Street View)",
+        help="Constant metres-per-unit used when the ground-plane fit fails "
+        "(default 0.075). Only affects non-metric depth back-ends.",
     )
     parser.add_argument(
         "--debug", action="store_true", help="Verbose console + composite debug image"
@@ -113,8 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-clear",
         type=float,
         default=1.20,
+        # Keep help text ASCII: argparse writes it to stdout, which is cp1252 on
+        # a default Windows console and raises UnicodeEncodeError otherwise.
         help="Minimum free walking path (meters). "
-        "ABNT NBR 9050 recomenda ≥ 1.20 m (default 1.20)",
+        "ABNT NBR 9050 recomenda >= 1.20 m (default 1.20)",
     )
     parser.add_argument(
         "--metrics-json",

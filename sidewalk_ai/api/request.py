@@ -6,6 +6,7 @@ import os
 import base64
 import cv2
 import numpy as np
+from sidewalk_ai.core.pipeline import DepthScale
 from sidewalk_ai.io.streetview import ImageRequest
 
 
@@ -90,11 +91,13 @@ def run_pipeline(pipe, cfg: RequestConfig):
     single-view (explicit heading) execution. It also applies geocoding when
     an address is provided and latitude/longitude are needed.
     """
-    # expose fallback knobs
-    if cfg.fallback_scale is not None:
-        os.environ["SWAI_FALLBACK_SCALE"] = str(cfg.fallback_scale)
-    if cfg.force_fallback:
-        os.environ["SWAI_FORCE_FALLBACK"] = "1"
+    # Depth-scale knobs travel as an explicit argument. They used to be written
+    # into os.environ, which leaked one request's settings into every other
+    # request served by the same process.
+    depth_scale = DepthScale(
+        fallback_scale=cfg.fallback_scale,
+        force_fallback=cfg.force_fallback,
+    )
 
     # Multi-view: prefer address or lat/lon; pipeline handles sampling
     if cfg.multi_view:
@@ -106,10 +109,13 @@ def run_pipeline(pipe, cfg: RequestConfig):
                 pitch=cfg.pitch,
                 fov=cfg.fov,
                 multi_view=True,
+                depth_scale=depth_scale,
             )
         elif cfg.address:
             # novo método específico de multi-view por endereço
-            out = pipe.analyse_address_multiview(cfg.address, pitch=cfg.pitch, fov=cfg.fov)
+            out = pipe.analyse_address_multiview(
+                cfg.address, pitch=cfg.pitch, fov=cfg.fov, depth_scale=depth_scale
+            )
         else:
             raise ValueError("Either address or lat+lon required for multi-view")
 
@@ -241,12 +247,24 @@ def run_pipeline(pipe, cfg: RequestConfig):
             lat=cfg.lat, lon=cfg.lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov
         )
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
+        return pipe.analyse_image(
+            img_path,
+            pitch=cfg.pitch,
+            fov=cfg.fov,
+            heading=cfg.heading,
+            depth_scale=depth_scale,
+        )
 
     if cfg.address:
         lat, lon = pipe.sv.geocode(cfg.address)
         req = ImageRequest(lat=lat, lon=lon, heading=cfg.heading, pitch=cfg.pitch, fov=cfg.fov)
         img_path = pipe.sv.fetch(req)
-        return pipe._analyse_path(img_path, pitch=cfg.pitch, fov=cfg.fov, heading=cfg.heading)
+        return pipe.analyse_image(
+            img_path,
+            pitch=cfg.pitch,
+            fov=cfg.fov,
+            heading=cfg.heading,
+            depth_scale=depth_scale,
+        )
 
     raise ValueError("Either address or lat+lon required")

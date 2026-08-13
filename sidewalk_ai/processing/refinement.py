@@ -166,13 +166,20 @@ def fit_line_ransac(
     ys: np.ndarray,
     thresh_px: float = 3.0,
     max_trials: int = 100,
+    seed: int | None = 0,
 ) -> tuple[float, float]:
-    """Robust y = m·x + b fit (RANSAC)."""
+    """
+    Robust y = m·x + b fit (RANSAC).
+
+    *seed* keeps the sample draw reproducible; pass ``None`` for a
+    non-deterministic fit.
+    """
     best_inliers: np.ndarray = np.empty(0, dtype=int)
     best_params = (0.0, 0.0)
+    rng = np.random.default_rng(seed)
 
     for _ in range(max_trials):
-        i, j = np.random.choice(len(xs), 2, replace=False)
+        i, j = rng.choice(len(xs), 2, replace=False)
         if xs[j] == xs[i]:
             continue
         m = (ys[j] - ys[i]) / (xs[j] - xs[i])
@@ -194,6 +201,7 @@ def fill_between_independent_lines(
     ransac_thresh: float = 3.0,
     ransac_trials: int = 100,
     return_lines: bool = False,
+    seed: int | None = 0,
 ) -> np.ndarray:
     """
     1. Extract visible top & bottom edges per **column**;
@@ -248,7 +256,7 @@ def fill_between_independent_lines(
         return fallback_result()
 
     m_top, b_top = np.polyfit(xs, ys_top, 1)  # no need to use RANSAC for the top line
-    m_bot, b_bot = fit_line_ransac(xs_fit, ys_fit_bot, ransac_thresh, ransac_trials)
+    m_bot, b_bot = fit_line_ransac(xs_fit, ys_fit_bot, ransac_thresh, ransac_trials, seed=seed)
 
     xs_full = np.arange(w)
     y_top = np.clip((m_top * xs_full + b_top).astype(int), 0, h - 1)
@@ -418,6 +426,7 @@ def refine_sidewalk_mask(
     min_keep_area_px: int = 5_000,
     bf_kwargs: dict | None = None,
     pl_kwargs: dict | None = None,
+    seed: int | None = 0,
 ) -> tuple[np.ndarray, tuple[tuple[float, float], tuple[float, float]]]:
     """
     Composite refinement used by the original prototype :contentReference[oaicite:3]{index=3}:
@@ -490,10 +499,12 @@ def refine_sidewalk_mask(
     # cv2.imwrite("debug_4_holefill.png", (keep * 255).astype(np.uint8))
 
     # 5) two-line infill (parallel curbs)
+    pl_args = dict(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200))
+    pl_args.setdefault("seed", seed)
     try:
         mask, (top_line, bot_line) = fill_between_independent_lines(
             keep,
-            **(pl_kwargs or dict(min_cols=20, ransac_thresh=4.0, ransac_trials=200)),
+            **pl_args,
             return_lines=True,
         )
     except Exception as exc:
@@ -506,10 +517,6 @@ def refine_sidewalk_mask(
         raise RefinementError(msg)
 
     mask = remove_new_pixels_outside_main_segment_x(mask, reference=keep, max_gap=2, pad_px=2)
-
-    # print(f" After two-line infill: {mask.sum()} px positive")
-    if debug_enabled():
-        cv2.imwrite("debug_5_twoline.png", (mask * 255).astype(np.uint8))
 
     _swai_log("refine", {"pos_px_before_refine": int(keep.sum())})
 

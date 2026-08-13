@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from pathlib import Path
-import re
 from typing import Union
 
 import cv2
 import numpy as np
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sidewalk_ai.processing.accessibility import _label_to_type
+from sidewalk_ai.labels import label_to_type
 
 # ─── color palette for known types ────────────────────────────────
 
@@ -24,10 +24,6 @@ _PALETTE = {
     "pole": (180, 0, 180),
     "bench": (0, 140, 255),
 }
-
-# ─── regex for label type extraction ───────────────────────────────
-
-_LABEL_TYPE_RE = re.compile(r"^([a-zA-Z0-9 _\-]+)")
 
 # ─── configuration ────────────────────────────────────────────────
 
@@ -108,7 +104,9 @@ def read_rgb(
 def _color_for_type(t: str) -> tuple[int, int, int]:
     if t in _PALETTE:
         return _PALETTE[t]
-    h = abs(hash(t)) & 0xFFFFFF
+    # blake2b instead of hash(): str hashing is salted per process
+    # (PYTHONHASHSEED), which would recolour the same label on every run.
+    h = int.from_bytes(hashlib.blake2b(t.encode("utf-8"), digest_size=3).digest(), "big")
     r = 50 + (h & 0xFF) % 206
     g = 50 + ((h >> 8) & 0xFF) % 206
     b = 50 + ((h >> 16) & 0xFF) % 206
@@ -126,7 +124,7 @@ def objects_overlay_bgr(rgb_bgr: np.ndarray, obstacles) -> np.ndarray:
     for lbl, m in obstacles:
         if m is None:
             continue
-        t = _label_to_type(lbl)
+        t = label_to_type(lbl)
         color = _color_for_type(t)
         mask = (m > 0) if m.dtype != bool else m
         # pinta região (blend local)
@@ -173,4 +171,4 @@ def sample_indices(n, k=3):
         return []
     if n <= k:
         return list(range(n))
-    return sorted(set([n // 4, n // 2, (3 * n) // 4]))[:k]
+    return sorted({(i + 1) * n // (k + 1) for i in range(k)})

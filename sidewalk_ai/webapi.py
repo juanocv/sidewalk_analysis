@@ -1,21 +1,47 @@
-from __future__ import annotations
-import cv2, os
+"""
+Sidewalk-AI Web API.
 
-from contextlib import asynccontextmanager
+Run it with::
+
+    python -m pip install -e ".[api,ml]"
+    uvicorn sidewalk_ai.webapi:app --host 127.0.0.1 --port 8000
+
+Endpoints and schemas are documented at ``/docs`` once the server is up; see
+also ``docs/webapi.md``.
+
+Concurrency
+-----------
+The endpoints are synchronous, so Starlette runs them in a worker thread pool
+and several requests can overlap. The segmentation and depth models behind them
+are neither thread-safe nor cheap in VRAM, so model work is serialised through a
+semaphore sized by ``SWAI_API_MAX_CONCURRENCY`` (default 1). Raise it only if the
+selected back-ends are known to tolerate concurrent inference on your hardware.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any
+
+import cv2
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+import sidewalk_ai as sw
+from sidewalk_ai.api.request import from_api_multi, from_api_single, run_pipeline
 from sidewalk_ai.io.image_io import objects_overlay_bgr, png_b64, png_triplet, sample_indices
+from sidewalk_ai.log import configure_logging, get_logger
+from sidewalk_ai.models.factory import build_depth
 from sidewalk_ai.processing.accessibility import (
+    compute_multiview_metrics,
+    compute_single_view_metrics,
     corridor_block,
     round_half_up,
     types_summary,
-    compute_single_view_metrics,
-    compute_multiview_metrics,
 )
-from pydantic import BaseModel, Field
-import sidewalk_ai as sw
-from sidewalk_ai.models.factory import build_depth
-from sidewalk_ai.api.request import from_api_single, from_api_multi, run_pipeline
-from sidewalk_ai.log import configure_logging, get_logger
 
 configure_logging(force=False)
 logger = get_logger(__name__)
@@ -32,37 +58,86 @@ NAME_MAP = {
 }
 VALID_ZOE = ["zoed_n", "zoed_k", "zoed_nk"]
 
-from fastapi.middleware.cors import CORSMiddleware
+DEFAULT_DEPTH = os.getenv("SWAI_DEPTH", "zoe")
+DEFAULT_ZOE_VARIANT = NAME_MAP.get(os.getenv("SWAI_ZOE_VARIANT", "zoed_n"), "zoed_n")
+
+# Serialises model work; see the module docstring.
+MAX_CONCURRENCY = max(1, int(os.getenv("SWAI_API_MAX_CONCURRENCY", "1")))
+_inference_slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
+
+# "*" keeps the bundled index.html working when opened from disk. Narrow it with
+# a comma-separated list once the front-end has a fixed origin.
+CORS_ORIGINS = [o.strip() for o in os.getenv("SWAI_API_CORS_ORIGINS", "*").split(",") if o.strip()]
 
 
-# define a lifespan context manager to load once
+@contextmanager
+def _inference_slot():
+    """Hold one of the model-inference slots for the duration of the block."""
+    acquired = _inference_slots.acquire(timeout=float(os.getenv("SWAI_API_QUEUE_TIMEOUT_S", "300")))
+    if not acquired:
+        raise HTTPException(503, "Server busy: inference queue timed out")
+    try:
+        yield
+    finally:
+        _inference_slots.release()
+
+
+class PipelineRegistry:
+    """
+    Lazily builds and caches one pipeline per (depth back-end, variant, refine).
+
+    The previous implementation kept a fixed dict keyed by (depth, refine) and
+    *replaced* an entry whenever a request asked for a different ZoeDepth
+    variant. That leaked one request's variant into every later request and
+    rebuilt the model on each call. Keying on the variant fixes both.
+    """
+
+    def __init__(self, segmenter: Any, streetview: Any) -> None:
+        self._segmenter = segmenter
+        self._streetview = streetview
+        self._depth_models: dict[tuple[str, str | None], Any] = {}
+        self._pipes: dict[tuple[str, str | None, bool], Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, backend: str, variant: str | None, refine: bool):
+        key = (backend, variant, refine)
+        with self._lock:
+            pipe = self._pipes.get(key)
+            if pipe is not None:
+                return pipe
+
+            depth = self._depth_models.get((backend, variant))
+            if depth is None:
+                logger.info("Loading depth back-end %s (variant=%s)", backend, variant)
+                depth = build_depth(backend, variant=variant)
+                self._depth_models[(backend, variant)] = depth
+
+            pipe = sw.SidewalkPipeline(
+                segmenter=self._segmenter,
+                depth=depth,
+                streetview=self._streetview,
+                refine=refine,
+            )
+            self._pipes[key] = pipe
+            return pipe
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting Sidewalk AI API lifespan")
-    seg = sw.build_segmenter("oneformer")  # reused by every pipe
-    sv = sw.StreetViewClient()  # reused by every pipe
-    app.state.sv = sv
+    logger.info("Starting Sidewalk AI API (max_concurrency=%s)", MAX_CONCURRENCY)
+    segmenter = sw.build_segmenter("oneformer")
+    streetview = sw.StreetViewClient()
 
-    # ---- depth back-ends ------------------------------------------------
-    depth_midas = build_depth("midas")
-    depth_zoe = build_depth(
-        "zoe",
-        variant=NAME_MAP.get(os.getenv("SWAI_ZOE_VARIANT", "zoed_n"), "zoed_n"),
-    )
+    app.state.sv = streetview
+    app.state.registry = PipelineRegistry(segmenter, streetview)
 
-    # ---- build four pipelines (depth × refine) -------------------------
-    def _make(depth_obj, refine: bool):
-        return sw.SidewalkPipeline(segmenter=seg, depth=depth_obj, streetview=sv, refine=refine)
+    # Warm the configured default so the first request does not pay for the
+    # model load. Other combinations are built on demand.
+    default_variant = DEFAULT_ZOE_VARIANT if DEFAULT_DEPTH == "zoe" else None
+    app.state.registry.get(DEFAULT_DEPTH, default_variant, True)
+    logger.info("Sidewalk AI API ready (default depth=%s)", DEFAULT_DEPTH)
 
-    app.state.pipes = {
-        ("midas", True): _make(depth_midas, True),
-        ("midas", False): _make(depth_midas, False),
-        ("zoe", True): _make(depth_zoe, True),
-        ("zoe", False): _make(depth_zoe, False),
-    }
-    logger.info("Sidewalk AI API pipelines loaded")
     yield
-    # (Optional) Shutdown logic here
 
 
 app = FastAPI(
@@ -72,10 +147,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── add this block right after app = FastAPI(...) ──────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or ["http://localhost"] if you prefer
+    allow_origins=CORS_ORIGINS,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -88,7 +162,7 @@ class AddressSingleReq(BaseModel):
     # ─── option A: free-form address ──────────────────────────────
     address: str | None = Field(
         default=None,
-        example="Av. Paulista 1578, São Paulo",
+        json_schema_extra={"example": "Av. Paulista 1578, São Paulo"},
         description="Ignored if lat+lon are given",
     )
     # ─── option B: explicit Street-View coordinates ───────────────
@@ -109,13 +183,13 @@ class AddressSingleReq(BaseModel):
         default=os.getenv("SWAI_DEPTH", "zoe"),
         pattern="^(zoe|midas)$",
         description="'zoe' (default) or 'midas'",
-        example="zoe",
+        json_schema_extra={"example": "zoe"},
     )
     zoe_variant: str | None = Field(
         default=None,
         description="Override ZoeDepth variant (ZoeD_N, ZoeD_K, ZoeD_NK) "
         "if depth='zoe'. Ignored otherwise.",
-        example="ZoeD_N",
+        json_schema_extra={"example": "ZoeD_N"},
     )
 
     # ─── geometry refinement knobs ────────────────────────────────
@@ -136,7 +210,9 @@ class AddressSingleReq(BaseModel):
 
 class AddressMultiReq(BaseModel):
     # Address OU lat/lon
-    address: str | None = Field(default=None, example="Av. Paulista 1578, São Paulo")
+    address: str | None = Field(
+        default=None, json_schema_extra={"example": "Av. Paulista 1578, São Paulo"}
+    )
     lat: float | None = Field(None)
     lon: float | None = Field(None)
     # heading não é usado em multi; pitch/fov são aceitos
@@ -147,7 +223,7 @@ class AddressMultiReq(BaseModel):
         default=None,
         description="Override ZoeDepth variant (ZoeD_N, ZoeD_K, ZoeD_NK) "
         "if depth='zoe'. Ignored otherwise.",
-        example="ZoeD_N",
+        json_schema_extra={"example": "ZoeD_N"},
     )
     refine: bool = True
     force_fallback: bool = False
@@ -209,41 +285,46 @@ class ClearanceItem(BaseModel):
 
 
 # ------------------------------------------------------------------ #
-# shared helper – runs the pipeline exactly once                     #
+# shared helpers                                                     #
 # ------------------------------------------------------------------ #
+def _resolve_variant(depth: str, zoe_variant: str | None) -> str | None:
+    """Canonical ZoeDepth variant for a request, or None for other back-ends."""
+    if depth != "zoe":
+        return None
+    if not zoe_variant:
+        return DEFAULT_ZOE_VARIANT
+    canonical = NAME_MAP.get(zoe_variant)
+    if canonical is None:
+        raise HTTPException(400, f"zoe_variant must be one of {', '.join(VALID_ZOE)}")
+    return canonical
+
+
 def _pick_depth_pipe(req_depth: str, req_refine: bool, zoe_variant: str | None):
-    # Build or pick the appropriate pipeline from app.state.pipes
-    key = (req_depth, req_refine)
-    if key not in app.state.pipes:
-        raise HTTPException(400, f"Depth backend '{req_depth}' not available")
+    """Pipeline for this request. Never mutates another request's pipeline."""
+    variant = _resolve_variant(req_depth, zoe_variant)
+    try:
+        return app.state.registry.get(req_depth, variant, req_refine)
+    except ModuleNotFoundError as exc:
+        raise HTTPException(503, f"Depth backend '{req_depth}' is not installed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-    pipe = app.state.pipes[key]
 
-    # optional on-the-fly Zoe variant override (replace depth in the selected pipe)
-    if req_depth == "zoe" and zoe_variant:
-        v = NAME_MAP.get(zoe_variant, None)
-        if v is None:
-            raise HTTPException(400, "zoe_variant must be one of " f"{', '.join(VALID_ZOE)}")
-        depth_obj = build_depth("zoe", variant=v)
-        app.state.pipes[key] = sw.SidewalkPipeline(
-            segmenter=pipe.segmenter, depth=depth_obj, streetview=app.state.sv, refine=req_refine
-        )
-        pipe = app.state.pipes[key]
-
-    return pipe
+def _run(pipe, cfg):
+    """Execute the pipeline under the inference semaphore, mapping errors."""
+    with _inference_slot():
+        try:
+            return run_pipeline(pipe, cfg)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/analyse/single", response_model=SingleResp)
 def analyse_single(req: AddressSingleReq):
     pipe = _pick_depth_pipe(req.depth, req.refine, req.zoe_variant)
-    # normaliza e roda single-view
-    cfg = from_api_single(req)
-    try:
-        res = run_pipeline(pipe, cfg)  # sempre um Result em single
-    except FileNotFoundError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    res = _run(pipe, from_api_single(req))  # sempre um Result em single
 
     # single-view → sempre um Result
     res_obj = res
@@ -273,6 +354,7 @@ def analyse_single(req: AddressSingleReq):
         )
         accessibility = acc.to_dict()
     except Exception:
+        logger.exception("Failed to compute single-view accessibility metrics")
         accessibility = None
 
     clearance_items = [
@@ -307,13 +389,8 @@ def analyse_single(req: AddressSingleReq):
 @app.post("/analyse/multi", response_model=MultiRespSlim)
 def analyse_multi(req: AddressMultiReq):
     pipe = _pick_depth_pipe(req.depth, req.refine, req.zoe_variant)
-    cfg = from_api_multi(req)
-    try:
-        res = run_pipeline(pipe, cfg)  # dict com 'results', 'metadata', 'per_heading', ...
-    except FileNotFoundError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    # dict com 'results', 'metadata', 'per_heading', ...
+    res = _run(pipe, from_api_multi(req))
 
     if not (isinstance(res, dict) and "results" in res):
         raise HTTPException(500, "Unexpected pipeline output for multi-view")
@@ -325,8 +402,9 @@ def analyse_multi(req: AddressMultiReq):
     # ---------- acessibilidade (LEFT/RIGHT/ALL) ----------
     try:
         acc = compute_multiview_metrics(left, right, min_clear_required_m=req.min_clear)
-    except Exception:
-        raise HTTPException(500, "Failed to compute multi-view accessibility metrics")
+    except Exception as exc:
+        logger.exception("Failed to compute multi-view accessibility metrics")
+        raise HTTPException(500, "Failed to compute multi-view accessibility metrics") from exc
 
     # ---------- sumarização por lado (formato compacto) ----------
     per_side = {}

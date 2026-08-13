@@ -24,6 +24,10 @@ CLI/API request
 - `sidewalk_ai.io` owns filesystem, network, image decoding, and geospatial I/O.
 - `sidewalk_ai.api` owns request normalization and response-oriented serialization helpers.
 - `sidewalk_ai.cli` owns command-line parsing and presentation.
+- `sidewalk_ai.webapi` owns the HTTP surface: schemas, the pipeline registry, and the
+  inference semaphore. It holds no estimation logic. See `docs/webapi.md`.
+- `sidewalk_ai.labels` is a dependency-free leaf shared by `io` and `processing`, so
+  neither has to import the other for label parsing.
 
 ## Dependency Rules
 

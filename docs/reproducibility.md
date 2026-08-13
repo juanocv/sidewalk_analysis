@@ -57,6 +57,56 @@ Install backend-specific packages separately when needed:
 - OneFormer: install its upstream dependencies and model assets.
 - ZoeDepth: install or clone the backend according to the target environment.
 
+## Determinism
+
+The estimation path is deterministic by default: the same mask and depth map
+always produce the same `WidthResult` and the same clearances.
+
+Two steps draw random samples and both take an explicit `seed` (default `0`):
+
+- `processing.geometry.compute_width(..., seed=0)` — jitter applied to the
+  near-perpendicular Δu target.
+- `processing.refinement.refine_sidewalk_mask(..., seed=0)` — RANSAC sampling for
+  the bottom curb line, forwarded to `fill_between_independent_lines` and
+  `fit_line_ransac`.
+
+Pass `seed=None` to either one to opt into non-deterministic behaviour, for
+example when quantifying the sensitivity of an estimate.
+
+Obstacle overlay colours are derived from a BLAKE2b digest of the label rather
+than `hash()`, so they do not change with `PYTHONHASHSEED` between runs.
+
+Model backends are a separate matter: GPU kernel selection and model downloads
+are not controlled by these seeds. Record the backend, the model variant, and the
+weight cache location alongside any published measurement.
+
+## Metric Scale for Relative Depth Back-Ends
+
+Width estimation reads the depth map as metres. ZoeDepth reports metres directly
+(`is_metric = True`) and is passed through untouched.
+
+MiDaS does not. It emits affine-invariant *inverse* depth, so the pipeline has two
+things to undo before the map means anything:
+
+1. `models.midas` inverts the disparity into a relative depth map, normalised so the
+   nearest surfaces sit near 1.0 and the far field is capped at 100x that distance.
+2. `processing.geometry.to_metric_depth` recovers the missing metres-per-unit factor
+   by fitting a ground plane (RANSAC) to the lowest sidewalk pixels that carry depth.
+   If the depth map were already metric that plane would sit `CAM_HEIGHT_M` (1.75 m)
+   from the optical centre, and the ratio gives the factor.
+
+When the fit lacks support the behaviour depends on how the run is configured:
+
+| Configuration | Result |
+| --- | --- |
+| `--fallback-scale` set (CLI default `0.075`) | the constant is used instead |
+| `--force-fallback` | the plane fit is skipped entirely |
+| no fallback (Web API default) | the depth path is dropped for that frame and the width comes from geometry alone |
+
+The last row is deliberate: an unscaled depth map would report widths in an arbitrary
+unit that looks like metres. The correct value for `--fallback-scale` depends on the
+back-end's output convention, so re-derive it whenever the depth model changes.
+
 ## Diagnostics
 
 Run diagnostics before loading any model weights:
@@ -90,7 +140,7 @@ $env:SWAI_LOG_FILE = "debug_out/pipeline.jsonl"
 CLI configuration:
 
 ```powershell
-python -m sidewalk_ai.cli.play --image generic/images/streetview_id1_heading0.jpg `
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg `
   --single-view --device cpu --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
 ```
 

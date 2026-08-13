@@ -28,12 +28,19 @@ On Windows, the same baseline checks can be run with:
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
 
+CI runs the identical sequence on Linux for Python 3.11 and 3.13; see
+`.github/workflows/checks.yml`. A pull request that leaves any of them red will fail.
+
 ## Testing Policy
 
 - Unit tests must not require `GOOGLE_API_KEY`.
 - Unit tests must not write outside `tmp_path` or the repository workspace.
-- GPU, model-download, and live API checks should be marked and kept out of the default suite.
+- GPU, model-download, and live API checks must carry the `gpu` or `network` marker.
+  `pyproject.toml` deselects both by default, so marking a test is what keeps it out of
+  the default suite — run them with `pytest -m gpu` or `pytest -m network`.
 - Geometry and refinement changes should include small synthetic masks/depth maps where possible.
+- Estimation code must stay deterministic: thread a `seed` through instead of calling
+  `np.random.*` directly, and prefer `hashlib` over `hash()` for anything that reaches output.
 
 ## Git Hygiene
 

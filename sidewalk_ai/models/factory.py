@@ -21,7 +21,7 @@ def build_segmenter(
         except ModuleNotFoundError as exc:
             _optional_import_error(
                 "The OneFormer segmentation backend",
-                "Install the ML extra with `python -m pip install -e \".[ml]\"`.",
+                'Install the ML extra with `python -m pip install -e ".[ml]"`.',
                 exc,
             )
         return OneFormerSegmenter(**kwargs)
@@ -71,7 +71,7 @@ def build_depth(
         except ModuleNotFoundError as exc:
             _optional_import_error(
                 "The MiDaS depth backend",
-                "Install the ML extra with `python -m pip install -e \".[ml]\"`.",
+                'Install the ML extra with `python -m pip install -e ".[ml]"`.',
                 exc,
             )
         return MidasEstimator(**kwargs)
@@ -82,7 +82,7 @@ def build_depth(
         except ModuleNotFoundError as exc:
             _optional_import_error(
                 "The ZoeDepth backend",
-                "Install the ML extra with `python -m pip install -e \".[ml]\"` and make "
+                'Install the ML extra with `python -m pip install -e ".[ml]"` and make '
                 "the ZoeDepth package available according to `docs/reproducibility.md`.",
                 exc,
             )

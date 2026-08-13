@@ -1,33 +1,39 @@
 #!/usr/bin/env python
 """
-Play-ground for the new pipeline.
+Command-line front-end for the sidewalk pipeline.
 
 Examples
 --------
-  1 Address mode (OneFormer+CUDA):
-        python -m sidewalk_ai.play "Av. Paulista 1578, São Paulo"
+  1 Address mode (OneFormer + CUDA):
+        sidewalk-ai "Av. Paulista 1578, Sao Paulo"
 
-  2 Local image, Detectron2 on CPU, label synonyms:
-        python -m sidewalk_ai.play --image generic/images/frame.jpg \
-                                    --seg detectron2 --device cpu \
-                                    --label sidewalk,pavement,path
+  2 Local image, Detectron2 on CPU:
+        sidewalk-ai --image generic/images/frame.jpg --seg detectron2 --device cpu
 """
+
+from __future__ import annotations
 
 import json
 import os
-import sidewalk_ai as sw
-from sidewalk_ai.cli._builder import build_segmenter
-from sidewalk_ai.cli._argparse import build_parser
-from sidewalk_ai.models.factory import build_depth
-import numpy as np
 import time
+from collections import defaultdict
 from pathlib import Path
+
+import numpy as np
+
+import sidewalk_ai as sw
 from sidewalk_ai.api.request import from_cli_args, run_pipeline
-from sidewalk_ai.processing.accessibility import (
-    compute_single_view_metrics,
-    compute_multiview_metrics,
-)
+from sidewalk_ai.cli._argparse import build_parser
+from sidewalk_ai.cli._builder import build_segmenter
+from sidewalk_ai.core.pipeline import DepthScale
+from sidewalk_ai.io.image_io import read_rgb
 from sidewalk_ai.log import configure_logging, get_logger
+from sidewalk_ai.models.factory import build_depth
+from sidewalk_ai.processing.accessibility import (
+    MID_RATIO,
+    compute_multiview_metrics,
+    compute_single_view_metrics,
+)
 
 logger = get_logger(__name__)
 
@@ -39,7 +45,7 @@ def _write_debug_sheet(*debug_args, **debug_kwargs):
         missing = exc.name or "an optional debug dependency"
         raise RuntimeError(
             "Debug sheet generation requires optional ML/debug dependencies. "
-            "Install the ML extra with `python -m pip install -e \".[ml]\"` and "
+            'Install the ML extra with `python -m pip install -e ".[ml]"` and '
             "install backend-specific packages such as Detectron2 when using "
             "`--debug` with those visualizations. Missing module: "
             f"{missing}"
@@ -47,133 +53,113 @@ def _write_debug_sheet(*debug_args, **debug_kwargs):
 
     return write_debug_sheet(*debug_args, **debug_kwargs)
 
-initial_time = time.time()
-# ───────────────────────── CLI args ────────────────────────────────
-args = build_parser().parse_args()
-configure_logging(
-    debug=args.debug,
-    level=args.log_level,
-    fmt=args.log_format,
-    log_file=args.log_file,
-)
-args.outdir.mkdir(exist_ok=True, parents=True)
-logger.info("CLI argument parsing took %.4f seconds", time.time() - initial_time)
+
+# --------------------------------------------------------------------------- #
+# Pipeline construction and execution                                         #
+# --------------------------------------------------------------------------- #
+def _build(args):
+    """Build the segmenter and the pipeline described by *args*."""
+    segmenter = build_segmenter(
+        args.seg,
+        ckpt=args.ckpt,
+        dl_model=args.deeplab_model,
+        device=args.device,
+        method=args.ensemble_method,
+    )
+    depth = build_depth(args.depth, variant=args.zoe_variant, device=args.device)
+    pipe = sw.SidewalkPipeline(
+        segmenter=segmenter,
+        depth=depth,
+        args=args,
+        streetview=sw.StreetViewClient(),
+        refine=args.refine,
+        depth_scale=DepthScale(
+            fallback_scale=args.fallback_scale,
+            force_fallback=args.force_fallback,
+        ),
+    )
+    return segmenter, pipe
 
 
-# ──────────────────────── Debug output ─────────────────────────────
-def log(msg: str):
-    if args.debug:
-        print("[DBG]", msg)
+def _run(args, pipe):
+    """
+    Execute the requested analysis.
+
+    Returns ``(result, multi_view_meta)`` where *multi_view_meta* is the rich
+    dict produced for multi-view runs, or ``None`` for single-view ones.
+    """
+    if args.image:
+        # pitch/fov must be forwarded: the width geometry derives the horizon
+        # from them, and letting them default silently used the wrong one.
+        result = pipe.analyse_image(
+            args.image.resolve(),
+            pitch=args.pitch,
+            fov=args.fov,
+            heading=args.heading,
+        )
+        return result, None
+
+    out = run_pipeline(pipe, from_cli_args(args))
+
+    # Multi-view runs come back as a rich dict; unwrap the estimates and keep
+    # the metadata for the summary and the JSON export.
+    if isinstance(out, dict) and "results" in out:
+        return out["results"], out
+    return out, None
 
 
-if args.debug:
-    os.environ["SWAI_DEBUG"] = "1"
-else:
-    os.environ.pop("SWAI_DEBUG", None)
+# --------------------------------------------------------------------------- #
+# Printing                                                                    #
+# --------------------------------------------------------------------------- #
+def _print_multi_view_summary(meta):
+    if not meta:
+        return
+    left_median = meta.get("left_median")
+    right_median = meta.get("right_median")
+    counts = meta.get("n_headings", {})
 
-# ――― expose the fallback scale so geometry.compute_width() can read it
-os.environ.setdefault("SWAI_FALLBACK_SCALE", str(args.fallback_scale))
-if args.force_fallback:
-    os.environ["SWAI_FORCE_FALLBACK"] = "1"
-
-# ──────────────────────── Build pipeline ───────────────────────────
-segmenter = build_segmenter(
-    args.seg,
-    ckpt=args.ckpt,
-    dl_model=args.deeplab_model,
-    device=args.device,
-    method=args.ensemble_method,
-)
-depth = build_depth(args.depth, variant=args.zoe_variant, device=args.device)
-streetview = sw.StreetViewClient()
-pipe = sw.SidewalkPipeline(segmenter=segmenter, depth=depth, args=args, streetview=streetview)
-logger.info("Pipeline building took %.4f seconds", time.time() - initial_time)
-
-# ── run ────────────────────────────────────────────────────────────
-if args.image:
-    from sidewalk_ai.core.pipeline import SidewalkPipeline
-
-    res = SidewalkPipeline._analyse_path(pipe, args.image.resolve())
-elif args.lat is not None and args.lon is not None:
-    lat, lon = args.lat, args.lon
-    # analyse_coords returns (left_estimates, right_estimates)
-    # Use the shared helper to apply CLI flags consistently
-    cfg = from_cli_args(args)
-    res = run_pipeline(pipe, cfg)
-else:
-    if not args.address:
-        raise ValueError("address or --image required")
-    cfg = from_cli_args(args)
-    res = run_pipeline(pipe, cfg)
-
-# If the shared helper returned a rich dict for multi-view runs, extract
-# the original 'results' (tuple or list) so the rest of the CLI (printing
-# helpers and debug sheet writer) works unchanged. Keep the metadata in
-# `multi_view_meta` for later use if needed.
-multi_view_meta = None
-if isinstance(res, dict) and "results" in res:
-    multi_view_meta = res
-    res = res["results"]
-
-# If we have multi-view metadata, print a short summary and optionally
-# write any obstacle images produced by the helper into args.outdir when
-# --debug is set.
-if multi_view_meta is not None:
-    meta = multi_view_meta.get("metadata")
-    if meta:
-        lm = meta.get("left_median")
-        rm = meta.get("right_median")
-        counts = meta.get("n_headings", {})
-        print("\nMULTI-VIEW SUMMARY:")
-        if lm:
+    print("\nMULTI-VIEW SUMMARY:")
+    for label, median, key in (
+        ("LEFT ", left_median, "left"),
+        ("RIGHT", right_median, "right"),
+    ):
+        if median:
             print(
-                f"  LEFT  median width = {lm[0]:.2f} ± {lm[1]:.2f} m  (headings={counts.get('left',0)})"
+                f"  {label} median width = {median[0]:.2f} "
+                f"± {median[1]:.2f} m  (headings={counts.get(key, 0)})"
             )
         else:
-            print(f"  LEFT  no median (headings={counts.get('left',0)})")
-        if rm:
-            print(
-                f"  RIGHT median width = {rm[0]:.2f} ± {rm[1]:.2f} m  (headings={counts.get('right',0)})"
-            )
-        else:
-            print(f"  RIGHT no median (headings={counts.get('right',0)})")
-
-logger.info("Pipeline run took %.4f seconds", time.time() - initial_time)
-
-"""
-    if args.debug:
-        imgs = multi_view_meta.get('obstacle_images', []) or []
-        perh = multi_view_meta.get('per_heading', []) or []
-        for i, b64 in enumerate(imgs):
-            try:
-                data = base64.b64decode(b64)
-                # try to get a friendly name from per_heading when available
-                label = None
-                if i < len(perh):
-                    p = perh[i]
-                    label = f"{p.get('side')}_{p.get('index')}"
-                fname = args.outdir / (f"obstacle_{label}.png" if label else f"obstacle_{i}.png")
-                fname.write_bytes(data)
-                print(f"WROTE DEBUG {fname}")
-            except Exception as e:
-                print(f"Failed to write obstacle image #{i}: {e}")
-"""
+            print(f"  {label} no median (headings={counts.get(key, 0)})")
 
 
-# ──────────────────────────── Print results ─────────────────────────
-# `analyse_coords` and `analyse_address` may return tuples of lists
-# (left_estimates, right_estimates). Normalize to a single printable
-# result for the CLI: prefer the median of the left side if available,
-# otherwise the right side, otherwise the single `res` object.
-def _print_result(obj):
-    if obj is None:
+def _print_clearance(clearance):
+    value = clearance.obs_width
+    if value is None or not np.isfinite(value):
+        value = float("nan")
+    left = getattr(clearance, "L_m", None)
+    right = getattr(clearance, "R_m", None)
+    if left is not None and right is not None:
+        print(f"CLEAR  {clearance.label:<8} {value:.2f} m  L={left:.2f}  R={right:.2f}")
+    else:
+        print(f"CLEAR  {clearance.label:<8} {value:.2f} m")
+
+
+def _accessibility_to_dict(metrics):
+    return {
+        "min_clear_required_m": metrics.min_clear_required_m,
+        "global": metrics.global_stats.__dict__,
+        "per_type": {k: v.__dict__ for k, v in metrics.per_type.items()},
+    }
+
+
+def _print_result(result, args):
+    """Print a single-view result (or the middle estimate of a side)."""
+    if result is None:
         print("No result")
         return
-    # obj may be a tuple (left_list, right_list)
-    if isinstance(obj, tuple) and len(obj) == 2:
-        left, right = obj
-        # prefer left median
-        chosen = None
+
+    if isinstance(result, tuple) and len(result) == 2:
+        left, right = result
         if left:
             chosen = left[len(left) // 2]
         elif right:
@@ -182,259 +168,238 @@ def _print_result(obj):
             print("No estimates returned for either side")
             return
     else:
-        chosen = obj
+        chosen = result
 
-    # Print width and clearances
     print(f"WIDTH  {chosen.width.width_m:.2f} ± {chosen.width.margin_m:.2f} m")
-    for c in chosen.clearances:
-        val = c.obs_width if c.obs_width is not None else float("nan")
-        L = getattr(c, "L_m", None)
-        R = getattr(c, "R_m", None)
-        if L is not None and R is not None:
-            print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
-        else:
-            print(f"CLEAR  {c.label:<8} {val:.2f} m")
+    for clearance in chosen.clearances:
+        _print_clearance(clearance)
 
     # ── Accessibility (single-view) ───────────────────────────────────
     try:
-        thr = float(getattr(args, "min_clear", 1.20))
-        # o mesmo fator usado no accessibility.py (padrão 0.50)
-        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
-        mid_thr = mid_ratio * thr
-        acc = compute_single_view_metrics(chosen.clearances, min_clear_required_m=thr)
-        g = acc.global_stats
-        med = g.free_total_m.get("median", float("nan"))
+        threshold = float(getattr(args, "min_clear", 1.20))
+        mid_threshold = MID_RATIO * threshold
+        metrics = compute_single_view_metrics(chosen.clearances, min_clear_required_m=threshold)
+        stats = metrics.global_stats
+        median = stats.free_total_m.get("median", float("nan"))
         print(
-            f"  Obstacles={g.total_obstacles} | "
-            f"Median corridor={med:.2f} m | "
-            f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)"
+            f"  Obstacles={stats.total_obstacles} | "
+            f"Median corridor={median:.2f} m | "
+            f"Rank={stats.rating} (II≥{mid_threshold:.2f} m, III≥{threshold:.2f} m)"
         )
-        # opcional: ainda pode mostrar a fração ≥ threshold, mas sem sugerir que afeta o ranking
-        # print(f"  Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
-        if acc.per_type:
+        if metrics.per_type:
             print("  Per-type corridor medians (m):")
-            for t, m in acc.per_type.items():
-                lm = m.free_left_m.get("median", float("nan"))
-                rm = m.free_right_m.get("median", float("nan"))
-                # tm = m.free_total_m.get('median', float('nan'))
-                print(f"    - {t}: left={lm:.2f}  right={rm:.2f}")
-        # optional JSON
+            for name, per_type in metrics.per_type.items():
+                left_median = per_type.free_left_m.get("median", float("nan"))
+                right_median = per_type.free_right_m.get("median", float("nan"))
+                print(f"    - {name}: left={left_median:.2f}  right={right_median:.2f}")
+
         if getattr(args, "metrics_json", None):
-            out = {
-                "min_clear_required_m": acc.min_clear_required_m,
-                "global": g.__dict__,
-                "per_type": {k: v.__dict__ for k, v in acc.per_type.items()},
-            }
-            Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
-    except Exception as e:
-        logger.warning("Failed to compute accessibility metrics for single-view: %s", e)
-
-
-def _print_tuple_results(obj):
-    """Print median for each side and all clearances per heading.
-
-    obj is (left_list, right_list)
-    """
-    left, right = obj
-    # lef_med = _median_of_estimates(left)
-    # rig_med = _median_of_estimates(right)
-
-    # Estimated sidewalk width range (multi-view)
-    def _width_range(estimates):
-        vals = [
-            getattr(e.width, "width_m", None)
-            for e in estimates
-            if getattr(e, "width", None) is not None
-            and getattr(e.width, "width_m", None) is not None
-            and np.isfinite(e.width.width_m)
-            and e.width.width_m > 0
-        ]
-        if not vals:
-            return None
-        x = np.asarray(vals, dtype=float)
-        if x.size >= 4:
-            lo = float(np.percentile(x, 10))
-            hi = float(np.percentile(x, 90))
-        else:
-            lo = float(np.min(x))
-            hi = float(np.max(x))
-        return lo, hi
-
-    left_range = _width_range(left)
-    right_range = _width_range(right)
-    all_range = _width_range(list(left) + list(right))
-    print("\nESTIMATED SIDEWALK WIDTH RANGE (multi-view):")
-    if left_range:
-        print(f"  LEFT  ≈ {left_range[0]:.2f} to {left_range[1]:.2f} m")
-    if right_range:
-        print(f"  RIGHT ≈ {right_range[0]:.2f} to {right_range[1]:.2f} m")
-    if all_range:
-        print(f"  ALL   ≈ {all_range[0]:.2f} to {all_range[1]:.2f} m")
-
-    # Print per-heading clearances and optionally write debug sheets
-    def _print_and_debug_list(lst, side_name):
-        # Print per-heading widths but aggregate clearances across headings
-        from collections import defaultdict
-
-        agg = defaultdict(list)  # label -> list of obs_widths
-        for i, res in enumerate(lst):
-            heading_deg = getattr(res, "heading", None)
-            heading_str = f" ({heading_deg}°)" if heading_deg is not None else ""
-            print(
-                f"\n{side_name} heading #{i}{heading_str}  WIDTH {res.width.width_m:.2f} ± {res.width.margin_m:.2f} m"
+            Path(args.metrics_json).write_text(
+                json.dumps(_accessibility_to_dict(metrics), ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
-            for c in res.clearances:
-                agg[c.label].append(c.obs_width)
-                val = c.obs_width
-                L = getattr(c, "L_m", None)
-                R = getattr(c, "R_m", None)
-                if val is None:
-                    val = float("nan")
-                if L is not None and R is not None:
-                    print(f"CLEAR  {c.label:<8} {val:.2f} m  L={L:.2f}  R={R:.2f}")
-                else:
-                    print(f"CLEAR  {c.label:<8} {val:.2f} m")
-            if args.debug:
-                # Ensure args.image exists for write_debug_sheet (it uses args.image.name)
-                old_image = getattr(args, "image", None)
-                try:
-                    img_path = getattr(res, "img_path", None)
-                    if img_path is None:
-                        # create a synthetic Path so write_debug_sheet can build a filename
-                        img_path = Path(f"{side_name}_{i}.png")
-                    args.image = img_path
-                    _write_debug_sheet(res, pipe, args, segmenter)
-                except Exception as e:
-                    print(f"Failed to write debug sheet for {side_name}#{i}: {e}")
-                finally:
-                    # restore original args.image
-                    args.image = old_image
+    except Exception as exc:
+        logger.warning("Failed to compute accessibility metrics for single-view: %s", exc)
 
-        # Print aggregated clearances summary for this side
-        if agg:
-            print(f"\n{side_name} AGGREGATED CLEARANCES:")
-            for label, vals in agg.items():
-                vals_num = [v for v in vals if v is not None and np.isfinite(v)]
-                mean_v = float(np.mean(vals_num)) if vals_num else float("nan")
-                med_v = float(np.median(vals_num)) if vals_num else float("nan")
-                cnt = len(vals)
-                print(f"  {label:<12} count={cnt:2d}  mean={mean_v:.2f} m  median={med_v:.2f} m")
-        else:
-            print(f"\n{side_name} AGGREGATED CLEARANCES: none")
 
-    _print_and_debug_list(left, "LEFT")
-    _print_and_debug_list(right, "RIGHT")
+def _width_range(estimates):
+    """Robust [lo, hi] band of plausible widths across multi-view estimates."""
+    values = [
+        float(e.width.width_m)
+        for e in estimates
+        if getattr(e, "width", None) is not None
+        and getattr(e.width, "width_m", None) is not None
+        and np.isfinite(e.width.width_m)
+        and e.width.width_m > 0
+    ]
+    if not values:
+        return None
+    x = np.asarray(values, dtype=float)
+    if x.size >= 4:
+        return float(np.percentile(x, 10)), float(np.percentile(x, 90))
+    return float(np.min(x)), float(np.max(x))
+
+
+def _print_side(estimates, side_name, args, pipe, segmenter):
+    """Per-heading widths and clearances for one side, plus optional debug sheets."""
+    aggregated = defaultdict(list)  # label -> obstacle widths
+
+    for index, result in enumerate(estimates):
+        heading = getattr(result, "heading", None)
+        heading_str = f" ({heading}°)" if heading is not None else ""
+        print(
+            f"\n{side_name} heading #{index}{heading_str}  "
+            f"WIDTH {result.width.width_m:.2f} ± {result.width.margin_m:.2f} m"
+        )
+        for clearance in result.clearances:
+            aggregated[clearance.label].append(clearance.obs_width)
+            _print_clearance(clearance)
+
+        if args.debug:
+            # write_debug_sheet builds its filename from args.image.
+            previous_image = getattr(args, "image", None)
+            try:
+                args.image = getattr(result, "img_path", None) or Path(f"{side_name}_{index}.png")
+                _write_debug_sheet(result, pipe, args, segmenter)
+            except Exception as exc:
+                logger.warning("Failed to write debug sheet for %s#%s: %s", side_name, index, exc)
+            finally:
+                args.image = previous_image
+
+    if not aggregated:
+        print(f"\n{side_name} AGGREGATED CLEARANCES: none")
+        return
+
+    print(f"\n{side_name} AGGREGATED CLEARANCES:")
+    for label, values in aggregated.items():
+        finite = [v for v in values if v is not None and np.isfinite(v)]
+        mean = float(np.mean(finite)) if finite else float("nan")
+        median = float(np.median(finite)) if finite else float("nan")
+        print(f"  {label:<12} count={len(values):2d}  mean={mean:.2f} m  median={median:.2f} m")
+
+
+def _print_tuple_results(result, args, pipe, segmenter, multi_view_meta):
+    """Print both sides of a multi-view run."""
+    left, right = result
+
+    ranges = {
+        "LEFT": _width_range(left),
+        "RIGHT": _width_range(right),
+        "ALL": _width_range(list(left) + list(right)),
+    }
+    print("\nESTIMATED SIDEWALK WIDTH RANGE (multi-view):")
+    for label in ("LEFT", "RIGHT", "ALL"):
+        band = ranges[label]
+        if band:
+            print(f"  {label:<5} ≈ {band[0]:.2f} to {band[1]:.2f} m")
+
+    _print_side(left, "LEFT", args, pipe, segmenter)
+    _print_side(right, "RIGHT", args, pipe, segmenter)
 
     # ── Accessibility (multi-view) ────────────────────────────────────
     try:
-        thr = float(getattr(args, "min_clear", 1.20))
-        import os
+        threshold = float(getattr(args, "min_clear", 1.20))
+        mid_threshold = MID_RATIO * threshold
 
-        mid_ratio = float(os.getenv("SWAI_RANK_MID_RATIO", "0.50"))
-        mid_thr = mid_ratio * thr
-
-        acc = compute_multiview_metrics(left, right, min_clear_required_m=thr)
-        print(f"\n[ACCESSIBILITY] threshold={thr:.2f} m")
+        metrics = compute_multiview_metrics(left, right, min_clear_required_m=threshold)
+        print(f"\n[ACCESSIBILITY] threshold={threshold:.2f} m")
         for side in ("LEFT", "RIGHT", "ALL"):
-            g = acc[side].global_stats
-            avg = g.avg_obstacles_per_view_rounded or g.avg_obstacles_per_view or g.total_obstacles
-            med = g.free_total_m.get("median", float("nan"))
-            print(
-                f"  {side:<5} → Obstacles≈{avg} (avg/view) | "
-                f"Median corridor={med:.2f} m | "
-                f"Rank={g.rating} (II≥{mid_thr:.2f} m, III≥{thr:.2f} m)"
+            stats = metrics[side].global_stats
+            average = (
+                stats.avg_obstacles_per_view_rounded
+                or stats.avg_obstacles_per_view
+                or stats.total_obstacles
             )
-            # opcional:
-            # print(f"           Share of corridors ≥{thr:.2f} m = {g.meets_ratio:.0%}")
-        # optional JSON
+            median = stats.free_total_m.get("median", float("nan"))
+            print(
+                f"  {side:<5} → Obstacles≈{average} (avg/view) | "
+                f"Median corridor={median:.2f} m | "
+                f"Rank={stats.rating} (II≥{mid_threshold:.2f} m, III≥{threshold:.2f} m)"
+            )
+
         if getattr(args, "metrics_json", None):
-
-            def _acc_to_dict(a):
-                return {
-                    "min_clear_required_m": a.min_clear_required_m,
-                    "global": a.global_stats.__dict__,
-                    "per_type": {k: v.__dict__ for k, v in a.per_type.items()},
-                }
-
-            out = {
-                "LEFT": _acc_to_dict(acc["LEFT"]),
-                "RIGHT": _acc_to_dict(acc["RIGHT"]),
-                "ALL": _acc_to_dict(acc["ALL"]),
-            }
-            # Bloco extra: resumo multi-view (largura + nº de headings)
-            mv_block = {}
-            # metadata retornado por run_pipeline (se existir)
-            meta = multi_view_meta.get("metadata") if multi_view_meta is not None else None
-            # n_headings: {"left": N, "right": M}
-            if isinstance(meta, dict) and "n_headings" in meta:
-                mv_block["n_headings"] = meta["n_headings"]
-
-            # Faixas de largura: preferir o metadata, cair para o cálculo local
-            def _range_to_dict(r):
-                return {"min_m": float(r[0]), "max_m": float(r[1])}
-
-            lw = meta.get("left_width_range") if isinstance(meta, dict) else None
-            rw = meta.get("right_width_range") if isinstance(meta, dict) else None
-            aw = meta.get("all_width_range") if isinstance(meta, dict) else None
-            # fallback para as faixas calculadas acima na função
-            if lw is None:
-                lw = left_range
-            if rw is None:
-                rw = right_range
-            if aw is None:
-                aw = all_range
-            width_range = {}
-            if lw:
-                width_range["LEFT"] = _range_to_dict(lw)
-            if rw:
-                width_range["RIGHT"] = _range_to_dict(rw)
-            if aw:
-                width_range["ALL"] = _range_to_dict(aw)
-            if width_range:
-                mv_block["width_range_m"] = width_range
-            # Só adiciona o bloco se tiver algo
-            if mv_block:
-                out["multi_view"] = mv_block
-            Path(args.metrics_json).write_text(json.dumps(out, ensure_ascii=False, indent=2))
-    except Exception as e:
-        logger.warning("Failed to compute accessibility metrics for multi-view: %s", e)
+            _write_multiview_json(args, metrics, ranges, multi_view_meta)
+    except Exception as exc:
+        logger.warning("Failed to compute accessibility metrics for multi-view: %s", exc)
 
 
-# Choose printing method based on result type
-if isinstance(res, tuple) and len(res) == 2:
-    _print_tuple_results(res)
-else:
-    _print_result(res)
-logger.info("Result printing took %.4f seconds", time.time() - initial_time)
+def _write_multiview_json(args, metrics, ranges, multi_view_meta):
+    payload = {side: _accessibility_to_dict(metrics[side]) for side in ("LEFT", "RIGHT", "ALL")}
 
-# ───────────────────────── Debug sheet ────────────────────────────
-# Always write a debug sheet when --debug is set. For file-based runs the
-# existing code used args.image; for single-view coordinate runs we may
-# not have args.image, so prefer res.img_path/rgb_image and temporarily
-# set args.image so the debug writer can build a sensible filename.
-if args.debug:
-    # ensure pipeline has an RGB image available
-    if getattr(res, "rgb_image", None) is not None:
-        pipe._last_rgb = res.rgb_image
-    else:
-        # fallback to args.image when present
-        if getattr(args, "image", None):
-            try:
-                pipe._last_rgb = sw.io.image_io.read_rgb(args.image)
-            except Exception:
-                pipe._last_rgb = getattr(pipe, "_last_rgb", None)
+    meta = multi_view_meta.get("metadata") if multi_view_meta else None
+    meta = meta if isinstance(meta, dict) else {}
 
-    # Temporarily ensure args.image exists for filename/header construction
-    old_image = getattr(args, "image", None)
+    block = {}
+    if "n_headings" in meta:
+        block["n_headings"] = meta["n_headings"]
+
+    # Prefer the ranges computed by the pipeline helper; fall back to the local ones.
+    width_range = {}
+    for side, key in (
+        ("LEFT", "left_width_range"),
+        ("RIGHT", "right_width_range"),
+        ("ALL", "all_width_range"),
+    ):
+        band = meta.get(key) or ranges.get(side)
+        if band:
+            width_range[side] = {"min_m": float(band[0]), "max_m": float(band[1])}
+    if width_range:
+        block["width_range_m"] = width_range
+
+    if block:
+        payload["multi_view"] = block
+
+    Path(args.metrics_json).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _write_final_debug_sheet(result, args, pipe, segmenter):
+    """Composite debug sheet for single-view runs."""
+    if getattr(result, "rgb_image", None) is not None:
+        pipe._last_rgb = result.rgb_image
+    elif getattr(args, "image", None):
+        try:
+            pipe._last_rgb = read_rgb(args.image)
+        except Exception:
+            pipe._last_rgb = getattr(pipe, "_last_rgb", None)
+
+    previous_image = getattr(args, "image", None)
     try:
-        if getattr(args, "image", None) is None:
-            if getattr(res, "img_path", None) is not None:
-                args.image = res.img_path
-            else:
-                args.image = Path("singleview.png")
-        _write_debug_sheet(res, pipe, args, segmenter)
-    except Exception as e:
-        logger.warning("Failed to write debug sheet: %s", e)
+        if previous_image is None:
+            args.image = getattr(result, "img_path", None) or Path("singleview.png")
+        _write_debug_sheet(result, pipe, args, segmenter)
+    except Exception as exc:
+        logger.warning("Failed to write debug sheet: %s", exc)
     finally:
-        args.image = old_image
-logger.info("Debug sheet writing took %.4f seconds", time.time() - initial_time)
+        args.image = previous_image
+
+
+# --------------------------------------------------------------------------- #
+# Entry point                                                                 #
+# --------------------------------------------------------------------------- #
+def main(argv: list[str] | None = None) -> int:
+    started = time.time()
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not (args.image or args.address or (args.lat is not None and args.lon is not None)):
+        parser.error("provide an address, --lat/--lon, or --image")
+
+    configure_logging(
+        debug=args.debug,
+        level=args.log_level,
+        fmt=args.log_format,
+        log_file=args.log_file,
+    )
+    args.outdir.mkdir(exist_ok=True, parents=True)
+    logger.info("CLI argument parsing took %.4f seconds", time.time() - started)
+
+    # geometry.py and refinement.py consult SWAI_DEBUG for their own artifacts.
+    if args.debug:
+        os.environ["SWAI_DEBUG"] = "1"
+    else:
+        os.environ.pop("SWAI_DEBUG", None)
+
+    segmenter, pipe = _build(args)
+    logger.info("Pipeline building took %.4f seconds", time.time() - started)
+
+    result, multi_view_meta = _run(args, pipe)
+    if multi_view_meta is not None:
+        _print_multi_view_summary(multi_view_meta.get("metadata"))
+    logger.info("Pipeline run took %.4f seconds", time.time() - started)
+
+    if isinstance(result, tuple) and len(result) == 2:
+        _print_tuple_results(result, args, pipe, segmenter, multi_view_meta)
+    else:
+        _print_result(result, args)
+        if args.debug:
+            _write_final_debug_sheet(result, args, pipe, segmenter)
+    logger.info("Total run took %.4f seconds", time.time() - started)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

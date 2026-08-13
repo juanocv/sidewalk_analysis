@@ -1,0 +1,59 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor and ceiling of the supported range (requires-python = ">=3.11").
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install OpenCV system libraries
+        # opencv-python links against libGL/libglib, which the runner image
+        # does not ship; without these `import cv2` fails at collection time.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,api]"
+
+      - name: compileall
+        run: python -m compileall sidewalk_ai -q
+
+      - name: ruff
+        run: python -m ruff check sidewalk_ai
+
+      - name: black
+        run: python -m black --check sidewalk_ai
+
+      - name: pytest
+        # The default suite is offline and CPU-only: pyproject deselects the
+        # `gpu` and `network` markers, so no weights are downloaded here.
+        run: python -m pytest
+
+      - name: diagnostics
+        run: python -m sidewalk_ai.diagnostics
