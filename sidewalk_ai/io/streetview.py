@@ -26,6 +26,13 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         populate_by_name=True,
+        # This class reads GOOGLE_API_KEY, which has no SWAI_ prefix, so it must
+        # load the whole .env file rather than a prefixed slice of it. Without
+        # `extra="ignore"` pydantic-settings' default (extra="forbid") rejects
+        # every unrelated key the file also carries for the other Settings
+        # classes (SWAI_DEBUG, SWAI_LOG_LEVEL, SWAI_IMG_*, ...), and the module
+        # fails to import.
+        extra="ignore",
     )
 
     google_api_key: str | None = Field(default=None, validation_alias="GOOGLE_API_KEY")
