@@ -127,6 +127,43 @@ class DeepLabSegmenter(Segmenter):
 # ----------------------------------------------------------------------- #
 #  Checkpoint loader – mirrors old  load_deeplab_cityscapes(...)
 # ----------------------------------------------------------------------- #
+
+# Architectures exposed by VainF's `network.modeling`. Longest architecture
+# prefix first so "deeplabv3plus_*" is never mistaken for "deeplabv3_*".
+_ARCHITECTURES = ("deeplabv3plus", "deeplabv3")
+_BACKBONES = (
+    "mobilenet",
+    "resnet50",
+    "resnet101",
+    "hrnetv2_32",
+    "hrnetv2_48",
+    "xception",
+)
+
+
+def infer_model_name(ckpt_path) -> str | None:
+    """
+    Guess the ``network.modeling`` entry point from a checkpoint filename.
+
+    Upstream names its weights after the architecture they belong to, e.g.
+    ``best_deeplabv3plus_mobilenet_cityscapes_os16.pth``. Loading a checkpoint
+    into the wrong backbone leaves most of the network randomly initialised, so
+    reading the name it advertises beats defaulting to a fixed architecture.
+
+    Returns ``None`` when the filename carries no recognisable pair, leaving the
+    choice to the caller.
+    """
+    from pathlib import Path
+
+    stem = Path(ckpt_path).stem.lower()
+    for architecture in _ARCHITECTURES:
+        for backbone in _BACKBONES:
+            name = f"{architecture}_{backbone}"
+            if name in stem:
+                return name
+    return None
+
+
 def load_deeplab_checkpoint(
     ckpt_path: str,
     *,

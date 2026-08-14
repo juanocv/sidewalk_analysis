@@ -31,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ckpt", help="Path to DeepLab checkpoint (.pth)")
     parser.add_argument(
         "--deeplab-model",
-        default="deeplabv3plus_resnet101",
-        help="Model ctor name inside your network.modeling "
-        "(e.g. deeplabv3plus_mobilenetv3_large)",
+        default=None,
+        help="Entry point inside network.modeling (e.g. deeplabv3plus_mobilenet). "
+        "Defaults to the architecture named in the --ckpt filename.",
     )
     parser.add_argument("--depth", default="zoe", choices=["midas", "zoe"])
     parser.add_argument(

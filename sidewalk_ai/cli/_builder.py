@@ -1,7 +1,13 @@
 from __future__ import annotations
+
+from pathlib import Path
+
 import sidewalk_ai as sw
 from sidewalk_ai.models.base import Segmenter
 from sidewalk_ai.models.ensemble import EnsembleSegmenter
+from sidewalk_ai.log import get_logger
+
+logger = get_logger(__name__)
 
 # hard-coded synonyms per back-end
 LABEL_MAP = {
@@ -23,7 +29,7 @@ class AliasSegmenter(Segmenter):
 
 
 # ───────────────────── Build the base segmenter(s) ──────────────────
-def _build_one(backend: str, *, ckpt: str | None, dl_model: str, device: str) -> Segmenter:
+def _build_one(backend: str, *, ckpt: str | None, dl_model: str | None, device: str) -> Segmenter:
     """Build a single back-end, applying its own construction requirements."""
     if backend not in LABEL_MAP:
         raise ValueError(
@@ -34,10 +40,26 @@ def _build_one(backend: str, *, ckpt: str | None, dl_model: str, device: str) ->
         # Required in an ensemble too, not just when deeplab runs alone.
         if ckpt is None:
             raise ValueError("--ckpt is required for Deeplab")
+
+        # An explicit --deeplab-model always wins; otherwise read the
+        # architecture off the checkpoint name, which upstream encodes there.
+        # A fixed default silently loaded mobilenet weights into resnet101.
+        model_name = dl_model
+        if model_name is None:
+            from sidewalk_ai.models.deeplab import infer_model_name
+
+            model_name = infer_model_name(ckpt)
+            if model_name is None:
+                raise ValueError(
+                    f"Could not infer the DeepLab architecture from {Path(ckpt).name!r}. "
+                    "Pass --deeplab-model explicitly (e.g. deeplabv3plus_mobilenet)."
+                )
+            logger.info("DeepLab architecture inferred from the checkpoint name: %s", model_name)
+
         return sw.build_segmenter(
             "deeplab",
             ckpt_path=ckpt,
-            model_name=dl_model,
+            model_name=model_name,
             allow_pickle=True,
             device=device,
         )
@@ -45,7 +67,7 @@ def _build_one(backend: str, *, ckpt: str | None, dl_model: str, device: str) ->
 
 
 def build_segmenter(
-    seg_flag: str, *, ckpt: str | None, dl_model: str, device: str, method: str | None
+    seg_flag: str, *, ckpt: str | None, dl_model: str | None, device: str, method: str | None
 ) -> Segmenter:
     """Build a segmenter based on the given flag and parameters."""
     backends = [name.strip() for name in seg_flag.split("+") if name.strip()]

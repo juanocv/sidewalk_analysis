@@ -89,3 +89,35 @@ def test_missing_file_is_reported_as_such(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         load_deeplab_checkpoint(str(tmp_path / "absent.pth"), model_name="small_net", device="cpu")
+
+
+# --------------------------------------------------------------------------- #
+# architecture inference from the checkpoint name                             #
+# --------------------------------------------------------------------------- #
+from sidewalk_ai.models.deeplab import infer_model_name  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("best_deeplabv3plus_mobilenet_cityscapes_os16.pth", "deeplabv3plus_mobilenet"),
+        ("best_deeplabv3plus_resnet101_cityscapes_os16.pth", "deeplabv3plus_resnet101"),
+        ("best_deeplabv3_resnet50_voc_os16.pth", "deeplabv3_resnet50"),
+        ("deeplabv3plus_hrnetv2_48_cityscapes.pth", "deeplabv3plus_hrnetv2_48"),
+        ("DeepLabV3Plus_MobileNet.PTH", "deeplabv3plus_mobilenet"),
+    ],
+)
+def test_architecture_is_read_from_the_filename(filename, expected):
+    assert infer_model_name(f"/weights/{filename}") == expected
+
+
+def test_plus_is_not_mistaken_for_the_plain_architecture():
+    # "deeplabv3plus_mobilenet" must never resolve to "deeplabv3_mobilenet".
+    assert infer_model_name("best_deeplabv3plus_mobilenet_cityscapes.pth").startswith(
+        "deeplabv3plus"
+    )
+
+
+def test_unrecognisable_name_returns_none():
+    # The caller turns this into "pass --deeplab-model explicitly".
+    assert infer_model_name("/weights/my_finetuned_weights.pth") is None
