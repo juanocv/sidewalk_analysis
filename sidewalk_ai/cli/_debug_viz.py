@@ -1,6 +1,10 @@
 from __future__ import annotations
 from typing import Optional, Sequence, Tuple
-from matplotlib import pyplot as plt
+import matplotlib
+
+# Same reason as processing.geometry: file output only, so never require Tk.
+matplotlib.use("Agg", force=True)
+from matplotlib import pyplot as plt  # noqa: E402
 import cv2, numpy as np, torch
 from pathlib import Path
 from sidewalk_ai.io.image_io import read_rgb
@@ -395,6 +399,12 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             except Exception:
                 # fallback: attempt to use original seg (may misalign)
                 pass
+        # Segment ids come in different dtypes per back-end: DeepLab yields uint8
+        # class ids, OneFormer and Detectron2 int32/int64. NumPy 2 rejects
+        # `uint8_array % 256` outright -- 256 does not fit the dtype -- so the
+        # palette lookup below used to raise OverflowError for DeepLab only.
+        seg = np.asarray(seg, dtype=np.int32)
+
         uniq = np.unique(seg)
         lut = make_palette()
         overlay = cv2.addWeighted(img_bgr, 0.35, lut[seg % 256], 0.65, 0)

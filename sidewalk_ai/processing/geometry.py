@@ -1244,6 +1244,13 @@ def _plot_compute_width_debug(
       - histograma de Δu com limites;
       - resumo textual.
     """
+    # Agg: these plots are only ever written to disk. Without forcing it,
+    # matplotlib picks an interactive backend and fails on any machine
+    # without Tcl/Tk -- a plain virtualenv on Windows, or a CI runner --
+    # with "Can't find a usable init.tcl", swallowed as debug_plot_error.
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     H, W = sidewalk_mask.shape
