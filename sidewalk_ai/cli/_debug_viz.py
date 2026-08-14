@@ -7,14 +7,6 @@ from sidewalk_ai.io.image_io import read_rgb
 from ._builder import LABEL_MAP
 
 
-def _project_root() -> Path:
-    """Return the repository root (two levels above this file)."""
-    try:
-        return Path(__file__).resolve().parents[2]
-    except Exception:
-        return Path.cwd()
-
-
 def make_palette():
     rng = np.random.default_rng(0)
     lut = rng.integers(0, 255, (256, 3), np.uint8)
@@ -342,7 +334,6 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     outdir: Path = args.outdir
     outdir.mkdir(exist_ok=True, parents=True)
     debug_mode = bool(getattr(args, "debug", False))
-    project_root = _project_root()
     # Prefer the image stored inside the Result (if available). Fallback to
     # res.img_path (load from disk) and finally pipeline._last_rgb.
     img_rgb = getattr(res, "rgb_image", None)
@@ -575,7 +566,10 @@ def write_debug_sheet(res, pipeline, args, segmenter):
         if img_bgr is None:
             return
         try:
-            out_path = project_root / f"{base_name}_{suffix}.png"
+            # outdir, not project_root: these used to land in the repository
+            # root, which is both outside --outdir and, for an editable install
+            # pointing elsewhere, outside the checkout the user is running from.
+            out_path = outdir / f"{base_name}_{suffix}.png"
             cv2.imwrite(str(out_path), cv2.cvtColor(img_bgr, cv2.COLOR_RGB2BGR))
             print(f"[debug_viz] wrote {out_path}")
         except Exception as exc:

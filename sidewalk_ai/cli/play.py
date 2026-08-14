@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -184,7 +185,7 @@ def _print_result(result, args):
         print(
             f"  Obstacles={stats.total_obstacles} | "
             f"Median corridor={median:.2f} m | "
-            f"Rank={stats.rating} (II≥{mid_threshold:.2f} m, III≥{threshold:.2f} m)"
+            f"Rank={stats.rating} (II>={mid_threshold:.2f} m, III>={threshold:.2f} m)"
         )
         if metrics.per_type:
             print("  Per-type corridor medians (m):")
@@ -271,7 +272,7 @@ def _print_tuple_results(result, args, pipe, segmenter, multi_view_meta):
     for label in ("LEFT", "RIGHT", "ALL"):
         band = ranges[label]
         if band:
-            print(f"  {label:<5} ≈ {band[0]:.2f} to {band[1]:.2f} m")
+            print(f"  {label:<5} ~ {band[0]:.2f} to {band[1]:.2f} m")
 
     _print_side(left, "LEFT", args, pipe, segmenter)
     _print_side(right, "RIGHT", args, pipe, segmenter)
@@ -292,9 +293,9 @@ def _print_tuple_results(result, args, pipe, segmenter, multi_view_meta):
             )
             median = stats.free_total_m.get("median", float("nan"))
             print(
-                f"  {side:<5} → Obstacles≈{average} (avg/view) | "
+                f"  {side:<5} -> Obstacles~{average} (avg/view) | "
                 f"Median corridor={median:.2f} m | "
-                f"Rank={stats.rating} (II≥{mid_threshold:.2f} m, III≥{threshold:.2f} m)"
+                f"Rank={stats.rating} (II>={mid_threshold:.2f} m, III>={threshold:.2f} m)"
             )
 
         if getattr(args, "metrics_json", None):
@@ -366,6 +367,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if not (args.image or args.address or (args.lat is not None and args.lon is not None)):
         parser.error("provide an address, --lat/--lon, or --image")
+
+    # A Windows console is cp1252 by default, where an unencodable character
+    # raises UnicodeEncodeError mid-print. That used to abort the whole
+    # accessibility block -- the NBR 9050 rating included -- leaving only a
+    # logged warning. Output text is ASCII now; this keeps a future slip
+    # degrading to "?" instead of losing a section.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # pragma: no cover - exotic streams
+                pass
 
     configure_logging(
         debug=args.debug,
