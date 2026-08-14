@@ -102,6 +102,64 @@ Detectron2's own custom kernels — deformable conv, rotated boxes — and the d
 `COCO-PanopticSegmentation/panoptic_fpn_R_50_3x` config uses none of them. Install the
 CUDA 11.8 toolkit and rebuild if a config you need does.
 
+### DeepLab on any platform
+
+The DeepLab backend loads `network.modeling` from VainF's DeepLabV3Plus-Pytorch
+checkout and a Cityscapes checkpoint. Neither ships through a package index:
+upstream has no `setup.py`, and the weights are published as Dropbox/Google Drive
+links in its README. There is no DeepLabV3+ Cityscapes mirror on the Hugging Face
+Hub either, so unlike OneFormer and Detectron2 this backend cannot be installed
+with one command.
+
+Pin the checkout and expose it to the virtualenv only:
+
+```powershell
+git clone https://github.com/VainF/DeepLabV3Plus-Pytorch.git
+git -C DeepLabV3Plus-Pytorch checkout 4e1087d   # pin for reproducibility
+
+# one line, the absolute path to the checkout
+"$PWD\DeepLabV3Plus-Pytorch" | Out-File -Encoding ascii `
+  .venv\Lib\site-packages\deeplabv3plus-checkout.pth
+```
+
+Then download `best_deeplabv3plus_mobilenet_cityscapes_os16.pth` from the upstream
+README and pass it with `--ckpt`, matching `--deeplab-model` to the backbone:
+
+```powershell
+sidewalk-ai --image path\to\frame.jpg --single-view `
+  --seg deeplab --ckpt path\to\best_deeplabv3plus_mobilenet_cityscapes_os16.pth `
+  --deeplab-model deeplabv3plus_mobilenet
+```
+
+Why a `.pth` file rather than `pip install`:
+
+- Upstream has no packaging metadata, and the `setup.py` some checkouts carry was
+  added locally. Its `find_packages()` would install `datasets`, `utils` and
+  `metrics` into site-packages — generic names that shadow real distributions,
+  `datasets` being Hugging Face's.
+- A `.pth` is scoped to one virtualenv, unlike `PYTHONPATH`, and its entry lands
+  *after* site-packages in `sys.path`, so a genuinely installed package still wins.
+
+### DeepLab reports no obstacles on Street View frames
+
+Measured on three sample frames: DeepLab estimates width normally (5.00 m, 2.61 m,
+2.68 m) but returns **zero obstacles** on all of them, where OneFormer finds a tree
+on the sidewalk in the same frame. This is not a threshold that can be tuned — the
+`vegetation` region has literally no pixel adjacent to DeepLab's sidewalk mask.
+
+It follows from Cityscapes' 19 coarse classes:
+
+- What OneFormer labels `grass` maps to `terrain`, which `models/_obstacles.py`
+  ignores as ground.
+- Cityscapes is semantic, not panoptic, so every tree in the frame merges into one
+  `vegetation` region whose contact with the sidewalk depends on where the trunk
+  was classified.
+
+Because "no obstacles" resolves to `meets_ratio = 1.0` and rating `III`, DeepLab's
+accessibility figures are **not comparable** with the other backends: it contributes
+a width estimate but always the most favourable rating. Treat it as a
+width-estimation baseline unless the obstacle vocabulary is revisited.
+
 ### Known-benign warnings
 
 Recent `transformers` releases print a load report for the OneFormer checkpoint:
