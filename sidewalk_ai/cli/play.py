@@ -58,6 +58,41 @@ def _write_debug_sheet(*debug_args, **debug_kwargs):
 # --------------------------------------------------------------------------- #
 # Pipeline construction and execution                                         #
 # --------------------------------------------------------------------------- #
+def _resolve_device(requested: str, parser) -> str:
+    """
+    Turn ``--device`` into a concrete device, failing early and readably.
+
+    Asking for CUDA on a CPU-only PyTorch build used to surface as
+    ``AssertionError: Torch not compiled with CUDA enabled`` from deep inside
+    ``Module.to()``, after the segmentation weights had already been downloaded
+    and loaded.
+    """
+    try:
+        import torch
+    except ModuleNotFoundError:
+        if requested == "cuda":
+            parser.error(
+                "--device cuda needs PyTorch, which is not installed. "
+                'Install the ML extra with `python -m pip install -e ".[ml]"`.'
+            )
+        return "cpu"
+
+    available = torch.cuda.is_available()
+    if requested == "auto":
+        resolved = "cuda" if available else "cpu"
+        logger.info("Device auto-selected: %s (torch %s)", resolved, torch.__version__)
+        return resolved
+
+    if requested == "cuda" and not available:
+        parser.error(
+            f"--device cuda was requested, but the installed PyTorch ({torch.__version__}) "
+            "cannot use CUDA on this machine. Re-run with --device cpu or --device auto, "
+            "or install a CUDA build from https://pytorch.org/get-started/locally/."
+        )
+
+    return requested
+
+
 def _build(args):
     """Build the segmenter and the pipeline described by *args*."""
     segmenter = build_segmenter(
@@ -395,6 +430,10 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["SWAI_DEBUG"] = "1"
     else:
         os.environ.pop("SWAI_DEBUG", None)
+
+    # Resolve before loading any weights, so an impossible request fails in
+    # milliseconds instead of after a multi-gigabyte download.
+    args.device = _resolve_device(args.device, parser)
 
     segmenter, pipe = _build(args)
     logger.info("Pipeline building took %.4f seconds", time.time() - started)

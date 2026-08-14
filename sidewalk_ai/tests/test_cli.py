@@ -130,3 +130,59 @@ def test_outdir_is_created(tmp_path, fake_pipeline):
     play.main(["--image", str(image), "--outdir", str(outdir)])
 
     assert outdir.is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# device resolution                                                           #
+# --------------------------------------------------------------------------- #
+class _FakeTorch:
+    def __init__(self, cuda_available, version="2.13.0+cpu"):
+        self.__version__ = version
+        self.cuda = type("cuda", (), {"is_available": staticmethod(lambda: cuda_available)})
+
+
+def _resolve(monkeypatch, requested, *, cuda_available):
+    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch(cuda_available))
+    return play._resolve_device(requested, play.build_parser())
+
+
+def test_auto_picks_cuda_when_available(monkeypatch):
+    assert _resolve(monkeypatch, "auto", cuda_available=True) == "cuda"
+
+
+def test_auto_falls_back_to_cpu(monkeypatch):
+    # The default used to be a hard "cuda", so a CPU-only PyTorch build failed
+    # the plain command with AssertionError from inside Module.to().
+    assert _resolve(monkeypatch, "auto", cuda_available=False) == "cpu"
+
+
+def test_explicit_cpu_is_honoured_even_with_a_gpu(monkeypatch):
+    assert _resolve(monkeypatch, "cpu", cuda_available=True) == "cpu"
+
+
+def test_explicit_cuda_without_cuda_is_a_usage_error(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        _resolve(monkeypatch, "cuda", cuda_available=False)
+
+    assert excinfo.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "cannot use CUDA" in stderr
+    assert "--device cpu" in stderr  # tells the user what to do next
+
+
+def test_missing_torch_reports_the_ml_extra(monkeypatch, capsys):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_torch(name, *args, **kwargs):
+        if name == "torch":
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_torch)
+
+    with pytest.raises(SystemExit):
+        play._resolve_device("cuda", play.build_parser())
+
+    assert '".[ml]"' in capsys.readouterr().err

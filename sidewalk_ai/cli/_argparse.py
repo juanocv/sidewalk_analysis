@@ -20,7 +20,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fusion rule when several back-ends are given. "
         "'majority' needs at least three to differ from 'and'.",
     )
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="Compute device. 'auto' (default) uses CUDA when the installed "
+        "PyTorch build can, otherwise CPU. Naming 'cuda' explicitly fails "
+        "loudly when it cannot.",
+    )
     parser.add_argument("--ckpt", help="Path to DeepLab checkpoint (.pth)")
     parser.add_argument(
         "--deeplab-model",

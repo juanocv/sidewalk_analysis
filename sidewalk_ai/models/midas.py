@@ -29,11 +29,14 @@ class MidasEstimator:
     def __init__(
         self,
         model_name: str | None = None,
-        device: str = "cuda",
+        device: str | None = None,
         trust_repo: bool = True,
         output_is_disparity: bool = True,
     ) -> None:
-        self.device = torch.device(device) if torch.cuda.is_available() else torch.device("cpu")
+        # None auto-selects, an explicit device is honoured. The previous form
+        # forced CPU whenever CUDA was unavailable, silently ignoring the
+        # caller, which is the opposite of what the other adapters do.
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model_name = model_name or self._DEFAULT_MODEL
 
         logger.info("Loading MiDaS model '%s' on device '%s'", self.model_name, self.device)
