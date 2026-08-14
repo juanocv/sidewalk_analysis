@@ -8,6 +8,9 @@ import cv2
 import numpy as np
 from sidewalk_ai.core.pipeline import DepthScale
 from sidewalk_ai.io.streetview import ImageRequest
+from sidewalk_ai.log import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -227,9 +230,12 @@ def run_pipeline(pipe, cfg: RequestConfig):
                             obstacle_images.append(
                                 base64.b64encode(cv2.imencode(".png", overlay)[1]).decode()
                             )
-                        except Exception:
-                            # if conversion fails, skip image
-                            pass
+                        except Exception as exc:
+                            # The overlay is a convenience; the numbers for
+                            # this heading are already in per_heading.
+                            logger.debug(
+                                "Could not render the overlay for %s#%s: %s", side_name, i, exc
+                            )
 
         result = {
             "results": out,

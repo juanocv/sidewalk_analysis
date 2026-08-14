@@ -377,7 +377,8 @@ def _write_final_debug_sheet(result, args, pipe, segmenter):
     elif getattr(args, "image", None):
         try:
             pipe._last_rgb = read_rgb(args.image)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Could not read %s for the debug sheet: %s", args.image, exc)
             pipe._last_rgb = getattr(pipe, "_last_rgb", None)
 
     previous_image = getattr(args, "image", None)

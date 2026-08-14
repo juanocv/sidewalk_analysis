@@ -8,7 +8,10 @@ from matplotlib import pyplot as plt  # noqa: E402
 import cv2, numpy as np, torch
 from pathlib import Path
 from sidewalk_ai.io.image_io import read_rgb
+from sidewalk_ai.log import get_logger
 from ._builder import LABEL_MAP
+
+logger = get_logger(__name__)
 
 
 def make_palette():
@@ -187,7 +190,7 @@ def get_segment_info_for_debug(segmenter, img_rgb):
                     segmenter.last_seg_map = seg_map
 
         except Exception as e:
-            print(f"Failed to get OneFormer segment info: {e}")
+            logger.warning("Could not read OneFormer segment info for the debug sheet: %s", e)
 
     elif backend_name == "detectron2":
         try:
@@ -222,7 +225,7 @@ def get_segment_info_for_debug(segmenter, img_rgb):
                     segmenter.metadata = metadata
 
         except Exception as e:
-            print(f"Failed to get Detectron2 segment info: {e}")
+            logger.warning("Could not read Detectron2 segment info for the debug sheet: %s", e)
 
     return seg_map, segments_info
 
@@ -265,7 +268,7 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
             if hasattr(base_segmenter, "id2label") and sid in base_segmenter.id2label:
                 return base_segmenter.id2label[sid]
         except Exception as e:
-            print(f"DeepLab lookup error: {e}")
+            logger.debug("DeepLab label lookup failed: %s", e)
 
     # 5) Detectron2-specific lookup using divisor logic
     if backend_name == "detectron2":
@@ -284,7 +287,7 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
                     return metadata.thing_classes[cat_id]
 
         except Exception as e:
-            print(f"Detectron2 lookup error: {e}")
+            logger.debug("Detectron2 label lookup failed: %s", e)
 
     # 6) OneFormer-specific lookup
     elif backend_name == "oneformer":
@@ -294,7 +297,7 @@ def _label(sid: int, segmenter, seg_info_list=None) -> str:
                 if hasattr(config, "id2label") and sid in config.id2label:
                     return config.id2label[sid]
         except Exception as e:
-            print(f"OneFormer lookup error: {e}")
+            logger.debug("OneFormer label lookup failed: %s", e)
 
     # 7) Generic fallback using stored mappings
     ID2LBL = None
@@ -345,7 +348,8 @@ def write_debug_sheet(res, pipeline, args, segmenter):
     if img_rgb is None and img_path_used is not None:
         try:
             img_rgb = read_rgb(img_path_used)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Could not reload %s for the debug sheet: %s", img_path_used, exc)
             img_rgb = None
     if img_rgb is None:
         img_rgb = getattr(pipeline, "_last_rgb", None)
@@ -380,9 +384,10 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             if seg_map_debug is not None:
                 seg_map_to_use = seg_map_debug
                 segments_info_to_use = segments_info_debug
-        except Exception:
-            # fall back to whatever the Result contains (likely None)
-            pass
+        except Exception as exc:
+            # Falls back to whatever the Result carries (likely None), which
+            # quietly produces a sheet without the panoptic overlay.
+            logger.warning("Could not collect segment info for the debug sheet: %s", exc)
 
     if seg_map_to_use is not None:
         seg = seg_map_to_use
@@ -390,15 +395,16 @@ def write_debug_sheet(res, pipeline, args, segmenter):
         # neighbour so overlays line up with the refined mask and image.
         if seg.shape != img_rgb.shape[:2]:
             try:
-                print(f"[debug_viz] resizing seg_map {seg.shape} -> {img_rgb.shape[:2]}")
+                logger.debug("Resizing seg_map %s -> %s", seg.shape, img_rgb.shape[:2])
                 seg = cv2.resize(
                     seg.astype(np.int32),
                     (img_rgb.shape[1], img_rgb.shape[0]),
                     interpolation=cv2.INTER_NEAREST,
                 )
-            except Exception:
-                # fallback: attempt to use original seg (may misalign)
-                pass
+            except Exception as exc:
+                # Using the unresized map leaves the overlay misaligned with
+                # the image, which is easy to misread as a segmentation fault.
+                logger.warning("Could not resize seg_map for the overlay: %s", exc)
         # Segment ids come in different dtypes per back-end: DeepLab yields uint8
         # class ids, OneFormer and Detectron2 int32/int64. NumPy 2 rejects
         # `uint8_array % 256` outright -- 256 does not fit the dtype -- so the
@@ -581,9 +587,9 @@ def write_debug_sheet(res, pipeline, args, segmenter):
             # pointing elsewhere, outside the checkout the user is running from.
             out_path = outdir / f"{base_name}_{suffix}.png"
             cv2.imwrite(str(out_path), cv2.cvtColor(img_bgr, cv2.COLOR_RGB2BGR))
-            print(f"[debug_viz] wrote {out_path}")
+            logger.info("Wrote %s", out_path)
         except Exception as exc:
-            print(f"[debug_viz] failed to write {suffix}: {exc}")
+            logger.warning("Failed to write the %s debug image: %s", suffix, exc)
 
     if debug_mode:
         _save_debug_image(panoptic_tile_for_save, "panoptic")
@@ -684,7 +690,9 @@ def plot_clearance_overlay_debug(
         if base_candidate_masks is not None:
             try:
                 cand_mask = base_candidate_masks[idx].astype(bool)
-            except Exception:
+            except Exception as exc:
+                # Recomputed from the obstacle below; only the provenance is lost.
+                logger.debug("No prepared base mask for obstacle %s: %s", idx, exc)
                 cand_mask = None
         else:
             cand_mask = None

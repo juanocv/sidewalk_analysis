@@ -11,6 +11,9 @@ import numpy as np
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sidewalk_ai.labels import label_to_type
+from sidewalk_ai.log import get_logger
+
+logger = get_logger(__name__)
 
 # ─── color palette for known types ────────────────────────────────
 
@@ -135,8 +138,9 @@ def objects_overlay_bgr(rgb_bgr: np.ndarray, obstacles) -> np.ndarray:
                 mask.astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(out, cnts, -1, color, 2)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Outlines are decorative; the fill already marks the obstacle.
+            logger.debug("Could not outline obstacle %r: %s", lbl, exc)
     return out
 
 

@@ -1217,8 +1217,11 @@ def compute_width(
                 prefix=debug_prefix,
             )
             _swai_log("debug_plot", {"path": debug_path})
-        except Exception as e:
-            _swai_log("debug_plot_error", {"error": str(e)})
+        except Exception as exc:
+            # The caller asked for --debug and did not get the plot, so say so
+            # in plain text: _swai_log hides the reason in a payload that the
+            # text log format never renders.
+            logger.warning("Could not write the compute_width debug plot: %s", exc)
 
     _swai_log("result", {"width": float(width), "margin": float(margin), "nrows": int(nrows)})
     return WidthResult(float(width), float(margin), int(nrows))

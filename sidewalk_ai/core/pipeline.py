@@ -27,14 +27,13 @@ from sidewalk_ai.log import debug_event, get_logger
 
 logger = get_logger(__name__)
 
-_LOGO_BAR_PX = 20  # faixa inferior com a barra/logo do Google
-try:
-    from sidewalk_ai.io.image_io import get_google_bar_height_px as _swai_get_bar_height
+from sidewalk_ai.io.image_io import get_google_bar_height_px
 
-    _LOGO_BAR_PX = int(_swai_get_bar_height())
-except Exception:
-    # fallback silencioso para manter compatibilidade se o helper nao existir
-    pass
+# Height of the Google logo strip, fed to compute_width as bottom_ignore_px.
+# This used to sit behind a bare `except Exception: pass` that fell back to 20,
+# guarding an import from this very package: if it had ever fired, the width
+# band would have shifted with nothing said. A broken package should fail here.
+_LOGO_BAR_PX = int(get_google_bar_height_px())
 
 
 WIDTH_PARAMS = {
