@@ -173,16 +173,25 @@ def load_deeplab_checkpoint(
         or raw.get("state_dict")
         or raw  # plain `torch.save(model.state_dict())`
     )
-    # ── NEW: keep only tensors whose shapes match the model ────────────
+    # keep only tensors whose shapes match the model
     model_keys = model.state_dict()
     filtered = {
         k: v for k, v in state.items() if (k in model_keys) and (v.shape == model_keys[k].shape)
     }
 
-    if not filtered:
+    # A mismatched backbone still matches a handful of tensors -- a mobilenet
+    # checkpoint fills 44 of resnet101's 674 -- so "not empty" is far too weak a
+    # test. It let a 93% randomly initialised network through, which segmented
+    # almost nothing and surfaced downstream as "No sidewalk support for width
+    # estimation" and a 0.00 m width, with nothing pointing at the real cause.
+    missing = [k for k in model_keys if k not in filtered]
+    if missing:
         raise RuntimeError(
-            "No matching layers between checkpoint and model. "
-            "Check `model_name` or supply the correct backbone."
+            f"Checkpoint {ckpt.name!r} does not fit model_name={model_name!r}: "
+            f"{len(filtered)} of {len(model_keys)} tensors matched, "
+            f"{len(missing)} would stay randomly initialised "
+            f"(first missing: {missing[:3]}). "
+            "Pass the --deeplab-model that matches the checkpoint's backbone."
         )
 
     model.load_state_dict(filtered, strict=False)
