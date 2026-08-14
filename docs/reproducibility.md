@@ -72,6 +72,36 @@ Install backend-specific packages separately when needed:
 ZoeDepth's own `environment.yml` pins 0.6.12; 0.6.13 is the first release that also runs
 on the supported Python. Loosen the pin only after checking both ends on a real image.
 
+### Detectron2 on Windows
+
+Detectron2 has no Windows wheels and builds C++ extensions from source. This recipe
+works on Windows 11 / Python 3.13 / torch 2.6.0+cu118, from a Developer environment:
+
+```powershell
+# 1. MSVC C++ build tools must be on the environment
+& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+
+# 2. Hide the GPU during the build, then install from a checkout
+$env:CUDA_VISIBLE_DEVICES = "-1"
+python -m pip install --no-build-isolation path\to\detectron2
+```
+
+Two things that are easy to get wrong:
+
+- **Hiding the GPU is what selects a CPU-only extension build.** Detectron2 compiles CUDA
+  ops when `torch.cuda.is_available() and CUDA_HOME`, and on Windows torch discovers
+  `CUDA_HOME` by globbing `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*` — so
+  clearing `CUDA_HOME`, `CUDA_PATH` and `FORCE_CUDA` is *not* enough. If the installed
+  CUDA toolkit does not match the one torch was built against (12.8 vs 11.8 here), the
+  build aborts with a version-mismatch error.
+- **`setuptools` must be older than 81.** Detectron2 0.6 imports `pkg_resources`, which
+  setuptools removed in 81: `python -m pip install "setuptools<81"`.
+
+CPU-only extensions do not stop the model from running on the GPU. They only affect
+Detectron2's own custom kernels — deformable conv, rotated boxes — and the default
+`COCO-PanopticSegmentation/panoptic_fpn_R_50_3x` config uses none of them. Install the
+CUDA 11.8 toolkit and rebuild if a config you need does.
+
 ### Known-benign warnings
 
 Recent `transformers` releases print a load report for the OneFormer checkpoint:
