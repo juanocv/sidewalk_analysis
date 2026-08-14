@@ -57,6 +57,36 @@ Install backend-specific packages separately when needed:
 - OneFormer: install its upstream dependencies and model assets.
 - ZoeDepth: install or clone the backend according to the target environment.
 
+### The timm pin
+
+`ml` pins `timm==0.6.13`, and the window is genuinely that narrow:
+
+- ZoeDepth builds its core through `torch.hub.load("intel-isl/MiDaS", ...)`, whose
+  `hubconf` imports `timm`. Without it the default `--depth zoe` cannot start at all.
+- timm 1.x renamed the BEiT block internals (`drop_path` became `drop_path1`/`drop_path2`),
+  which MiDaS calls directly, and made `relative_position_index` a non-persistent buffer
+  that the published checkpoints still carry.
+- timm 0.6.12 and older fail to import on Python 3.11+ (mutable dataclass default in
+  `timm.models.maxxvit`), and this project requires 3.11.
+
+ZoeDepth's own `environment.yml` pins 0.6.12; 0.6.13 is the first release that also runs
+on the supported Python. Loosen the pin only after checking both ends on a real image.
+
+### Known-benign warnings
+
+Recent `transformers` releases print a load report for the OneFormer checkpoint:
+
+```text
+...swin.encoder.layers.*.attention.self.relative_position_index | UNEXPECTED
+model.pixel_level_module.encoder.swin.layernorm.{weight,bias}   | MISSING
+```
+
+Both are safe to ignore. The `relative_position_index` entries are non-persistent buffers
+the checkpoint still ships. The final `swin.layernorm` is not in the checkpoint at all, and
+`transformers` initialises it to the LayerNorm identity affine — but OneFormer consumes the
+per-stage feature maps, not the Swin `sequence_output`, so its result is discarded.
+Multiplying those weights by 7 leaves the predicted masks bit-identical.
+
 ## Determinism
 
 The estimation path is deterministic by default: the same mask and depth map

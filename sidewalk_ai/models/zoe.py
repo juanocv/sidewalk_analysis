@@ -15,6 +15,22 @@ def _swai_log(tag, payload):
         debug_event(logger, tag, payload)
 
 
+def _unwrap_checkpoint(state: dict) -> dict:
+    """
+    Pull the weights out of a ZoeDepth checkpoint.
+
+    The published `.pt` files are *training* checkpoints: the parameters sit
+    under a ``"model"`` key alongside ``"optimizer"`` and ``"epoch"``. Feeding
+    the wrapper straight to ``load_state_dict`` matches nothing, which
+    ``strict=False`` reports as 511 missing keys and no error at all.
+
+    Mirrors ``zoedepth.models.model_io.load_state_dict``, including the
+    ``module.`` prefix that DataParallel adds when saving.
+    """
+    state = state.get("model", state)
+    return {(k[7:] if k.startswith("module.") else k): v for k, v in state.items()}
+
+
 # ------------------------------------------------------
 
 
@@ -45,12 +61,18 @@ class ZoeDepthEstimator:
         )
 
         # --- build architecture only ---
+        # pretrained=False is deliberate: with pretrained=True ZoeDepth loads the
+        # official checkpoint itself, strictly, and a timm >= 1.0 backbone
+        # registers `relative_position_index` as a non-persistent buffer that the
+        # checkpoint still carries -> "Unexpected key(s) in state_dict".
+        # The weights are applied below instead, tolerantly, which also avoids
+        # downloading and loading the same checkpoint twice.
         self.model = (
             torch.hub.load(
                 hub_repo,
                 _VARIANTS[variant],
                 source="local" if source == "local" else "github",
-                pretrained=True,
+                pretrained=False,
             )
             .to(self.device)
             .eval()
@@ -75,7 +97,25 @@ class ZoeDepthEstimator:
 
             state = torch.hub.load_state_dict_from_url(url, map_location="cpu", progress=True)
 
-        self.model.load_state_dict(state, strict=False)  # ignore extra keys
+        # strict=False tolerates the buffer mismatch described above, but it would
+        # just as happily accept a checkpoint whose names match nothing at all and
+        # leave the model randomly initialised. Check what actually landed.
+        incompatible = self.model.load_state_dict(_unwrap_checkpoint(state), strict=False)
+        if incompatible.missing_keys:
+            raise RuntimeError(
+                f"ZoeDepth checkpoint for variant {variant!r} left "
+                f"{len(incompatible.missing_keys)} parameter(s) uninitialised, "
+                f"starting with {incompatible.missing_keys[:3]}. The weights do not "
+                "match this architecture; refusing to run with random parameters."
+            )
+        _swai_log(
+            "zoe_load",
+            {
+                "variant": variant,
+                "ignored_keys": len(incompatible.unexpected_keys),
+                "sample": incompatible.unexpected_keys[:3],
+            },
+        )
 
         # keep a lightweight handle to the helper only after weights are ok
         from zoedepth.utils.misc import pil_to_batched_tensor
