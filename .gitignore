@@ -26,6 +26,9 @@ htmlcov/
 # Models
 prototype/utils/models
 
+# Model checkpoints fetched from upstream (DeepLab Cityscapes weights, etc.)
+checkpoints
+
 #DeepLab
 DeepLabV3Plus-Pytorch
 

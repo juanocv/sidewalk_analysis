@@ -50,6 +50,11 @@ def build_segmenter(
         ckpt = kwargs.pop("ckpt_path")
         loader_keys = {"model_name", "num_classes", "output_stride", "allow_pickle"}
         loader_kwargs = {k: kwargs.pop(k) for k in loader_keys if k in kwargs}
+        # Read, don't pop: the loader materialises the model on a device and the
+        # segmenter moves it again, so both need the caller's choice. Dropping it
+        # here left the loader on its own default and made --device cpu a no-op.
+        if "device" in kwargs:
+            loader_kwargs["device"] = kwargs["device"]
         dl = load_deeplab_checkpoint(ckpt, **loader_kwargs)
         return DeepLabSegmenter(dl, **kwargs)
 

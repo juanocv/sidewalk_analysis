@@ -92,6 +92,46 @@ def test_missing_file_is_reported_as_such(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# device selection                                                            #
+# --------------------------------------------------------------------------- #
+# Every test above names `device="cpu"` explicitly, which is exactly why none of
+# them caught the CLI path being broken: `--device cpu` was dropped on the way to
+# the loader, whose default was a hardcoded "cuda". On a machine without a GPU
+# the DeepLab back-end was unreachable, failing with a bare
+# "RuntimeError: No CUDA GPUs are available".
+
+
+def test_default_device_does_not_assume_cuda(checkpoint):
+    model = load_deeplab_checkpoint(str(checkpoint), model_name="small_net")
+
+    expected = "cuda" if torch.cuda.is_available() else "cpu"
+    assert next(model.parameters()).device.type == expected
+
+
+def test_factory_forwards_the_requested_device_to_the_loader(checkpoint, monkeypatch):
+    from sidewalk_ai.models import deeplab as deeplab_module
+    from sidewalk_ai.models.factory import build_segmenter
+
+    seen = {}
+    real_loader = deeplab_module.load_deeplab_checkpoint
+
+    def spy(path, **kwargs):
+        seen.update(kwargs)
+        return real_loader(path, **kwargs)
+
+    monkeypatch.setattr(deeplab_module, "load_deeplab_checkpoint", spy)
+
+    build_segmenter(
+        "deeplab",
+        ckpt_path=str(checkpoint),
+        model_name="small_net",
+        device="cpu",
+    )
+
+    assert seen.get("device") == "cpu"
+
+
+# --------------------------------------------------------------------------- #
 # architecture inference from the checkpoint name                             #
 # --------------------------------------------------------------------------- #
 from sidewalk_ai.models.deeplab import infer_model_name  # noqa: E402

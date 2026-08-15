@@ -170,7 +170,7 @@ def load_deeplab_checkpoint(
     model_name: str = "deeplabv3plus_resnet101",
     num_classes: int = 19,
     output_stride: int = 16,
-    device: str = "cuda",
+    device: str | None = None,
     allow_pickle: bool = True,
 ):
     """
@@ -232,4 +232,8 @@ def load_deeplab_checkpoint(
         )
 
     model.load_state_dict(filtered, strict=False)
-    return model.to(device).eval()
+    # Mirrors DeepLabSegmenter: a hardcoded "cuda" default here made the whole
+    # back-end unreachable on a CPU-only machine, since the caller's --device
+    # never reached this function and torch raised "No CUDA GPUs are available".
+    target = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    return model.to(target).eval()
