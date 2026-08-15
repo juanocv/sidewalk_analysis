@@ -32,8 +32,25 @@ as local external dependencies and are excluded from the Python package build.
 
 ## Setup
 
-Use Python 3.11 or newer. GPU model stacks may require a stricter Python/PyTorch/CUDA matrix, so
-install those backends according to their upstream documentation.
+Needs Python 3.11 or newer, on Windows, Linux or macOS. GPU model stacks may require a
+stricter Python/PyTorch/CUDA matrix, so install those backends according to their upstream
+documentation.
+
+**Linux** — Debian and Ubuntu do not ship `venv` with the interpreter, and OpenCV links
+against libGL, so install those first. Note that Ubuntu 22.04 LTS still ships Python 3.10,
+below this project's floor; use 24.04, or add the deadsnakes PPA and substitute `python3.11`
+for `python3` below.
+
+```bash
+sudo apt install python3-venv libgl1 libglib2.0-0
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+**Windows**
 
 ```powershell
 python -m venv .venv
@@ -44,22 +61,28 @@ python -m pip install -e ".[dev]"
 
 The base install is enough for unit tests and lightweight package imports. The examples in
 the **Running** section load real segmentation/depth models, so install the ML layer before
-running them:
+running them — the same command on both systems:
 
-```powershell
+```bash
 python -m pip install -e ".[ml]"
 ```
 
-On Windows, install the PyTorch build that matches your CPU/CUDA setup and install
-backend-specific packages such as Detectron2, OneFormer, or ZoeDepth according to their upstream
-instructions when you select those backends.
+That layer pins `timm`, which ZoeDepth needs, but PyTorch itself is left to you: install the
+CPU or CUDA build that matches your machine from
+[pytorch.org](https://pytorch.org/get-started/locally/). Detectron2 and the DeepLab checkout
+have their own steps, described in
+[`docs/reproducibility.md`](docs/reproducibility.md).
+
+A helper does the venv and the install in one step, with the optional layers behind flags:
+
+```bash
+./scripts/setup-dev.sh --api --ml                                         # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1 -WithApi -WithMl   # Windows
+```
 
 Copy `.env.example` to `.env` and set `GOOGLE_API_KEY` before running Street View calls.
 The key is required only when the code performs an actual Google API request; importing modules
 and running unit tests do not require it.
-
-For backend-specific Windows/CUDA guidance, diagnostics, and logging setup, see
-[`docs/reproducibility.md`](docs/reproducibility.md).
 
 ## Running
 
@@ -68,7 +91,7 @@ runs the same entry point if you prefer not to rely on the installed script.
 
 Single image:
 
-```powershell
+```bash
 sidewalk-ai --image generic/images/streetview_id1_heading0.jpg --single-view --device cpu
 ```
 
@@ -78,13 +101,13 @@ dependencies.
 
 Coordinates:
 
-```powershell
+```bash
 sidewalk-ai --lat -23.678479 --lon -46.559621 --multi-view --device cuda
 ```
 
 Address:
 
-```powershell
+```bash
 sidewalk-ai "Av. Paulista 1578, Sao Paulo" --multi-view --device cuda
 ```
 
@@ -105,7 +128,7 @@ Pipeline knobs worth knowing:
 
 The same pipeline is exposed over HTTP for integration with external systems:
 
-```powershell
+```bash
 python -m pip install -e ".[api,ml]"
 uvicorn sidewalk_ai.webapi:app --host 127.0.0.1 --port 8000
 ```
@@ -122,31 +145,38 @@ for endpoints, configuration, and the concurrency model.
 
 Runtime diagnostics:
 
-```powershell
+```bash
 python -m sidewalk_ai.diagnostics
 python -m sidewalk_ai.diagnostics --json
 ```
 
 Structured logs:
 
+```bash
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg \n  --single-view --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
+```
+
+On PowerShell the line continuation is a backtick rather than a backslash:
+
 ```powershell
 sidewalk-ai --image generic/images/streetview_id1_heading0.jpg `
-  --single-view --device cpu --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
+  --single-view --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
 ```
 
 ## Quality Checks
 
-```powershell
+```bash
 python -m compileall sidewalk_ai -q
 python -m pytest
 python -m ruff check sidewalk_ai
 python -m black --check sidewalk_ai
 ```
 
-Windows helper:
+Or through the helper that wraps all of them, including diagnostics:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```bash
+./scripts/check.sh                                              # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1     # Windows
 ```
 
 These same four checks run in CI on Linux for Python 3.11 and 3.13
@@ -156,7 +186,7 @@ The default suite is unit-level: it never downloads models, calls Google APIs, o
 That is enforced, not just documented — `pyproject.toml` deselects the `gpu` and `network`
 markers by default. Run the excluded checks deliberately:
 
-```powershell
+```bash
 python -m pytest -m gpu
 python -m pytest -m network
 ```

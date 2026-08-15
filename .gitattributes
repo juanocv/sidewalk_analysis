@@ -1,0 +1,16 @@
+# Normalise to LF in the repository; check out native line endings on Windows.
+* text=auto
+
+# Shell scripts must keep LF even on a Windows checkout: CRLF makes the kernel
+# fail to find the interpreter ("bad interpreter: No such file or directory").
+*.sh text eol=lf
+
+# PowerShell is the Windows counterpart and is happiest with CRLF there.
+*.ps1 text eol=crlf
+
+# Never let the golden values be rewritten by an end-of-line conversion.
+*.json text eol=lf
+
+*.png binary
+*.jpg binary
+*.pth binary
