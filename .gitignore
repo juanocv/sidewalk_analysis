@@ -1,31 +1,33 @@
 # API
 .env
+.env.*
+!.env.example
 generic/config.py
 
-# Images
-debug_out
+# Generated artifacts
+debug_out/
+/*.png
+/*.jpg
+/*.jpeg
+/*.html
+generic/tests/*.pdf
+prototype/estimation/output/
 
-# pyCache
-.pytest_cache
-generic/__pycache__
-prototype/estimation/analysis/__pycache__
-prototype/estimation/__pycache__
-prototype/accessibility/__pycache__
-prototype/utils/__pycache__
-prototype/accessibility/tests/width_estimation/__pycache__
-prototype/accessibility/tests/__pycache__
-prototype/estimation/tests/__pycache__
-
-sidewalk_ai/__pycache__
-sidewalk_ai/cli/__pycache__
-sidewalk_ai/core/__pycache__
-sidewalk_ai/io/__pycache__
-sidewalk_ai/models/__pycache__
-sidewalk_ai/processing/__pycache__
-sidewalk_ai/tests/__pycache__
+# Python cache/test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
 
 # Models
 prototype/utils/models
+
+# Model checkpoints fetched from upstream (DeepLab Cityscapes weights, etc.)
+checkpoints
 
 #DeepLab
 DeepLabV3Plus-Pytorch
@@ -46,16 +48,13 @@ build
 .vscode
 
 # Venv
-venv 
+venv/
+.venv/
+sidewalk-env/
 
 # Models configs
 generic/config.py
-generic/output
-sidewalk-env
+generic/output/
 
 # Model checkpoints
-sidewalk_ai/models/checkpoints
-
-# Environment
-environment.yml
-requirements.txt
+sidewalk_ai/models/checkpoints/

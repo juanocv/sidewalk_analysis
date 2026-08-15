@@ -1,68 +1,99 @@
-# sidewalk_ai/models/factory.py
 from __future__ import annotations
-from typing import Any, Literal
-# ─── segmentation back-ends ────────────────────────────────────────
-from .detectron2 import Detectron2Segmenter
-from .oneformer  import OneFormerSegmenter
-from .deeplab    import DeepLabSegmenter, load_deeplab_checkpoint
-# ─── depth back-ends ───────────────────────────────────────────────
-from .midas import MidasEstimator
-from .zoe   import ZoeDepthEstimator          
 
-# ------------------------------------------------------------------ #
-#  SEGMENTER  FACTORY                                                #
-# ------------------------------------------------------------------ #
+from typing import Any, Literal
+
+
+def _optional_import_error(component: str, install_hint: str, exc: ModuleNotFoundError) -> None:
+    missing = exc.name or "unknown"
+    raise ModuleNotFoundError(
+        f"{component} requires optional dependencies that are not installed. "
+        f"Missing module: {missing}. {install_hint}"
+    ) from exc
+
+
 def build_segmenter(
     backend: Literal["oneformer", "detectron2", "deeplab"] = "oneformer",
     **kwargs: Any,
 ):
     if backend == "oneformer":
+        try:
+            from .oneformer import OneFormerSegmenter
+        except ModuleNotFoundError as exc:
+            _optional_import_error(
+                "The OneFormer segmentation backend",
+                'Install the ML extra with `python -m pip install -e ".[ml]"`.',
+                exc,
+            )
         return OneFormerSegmenter(**kwargs)
+
     if backend == "detectron2":
+        try:
+            from .detectron2 import Detectron2Segmenter
+        except ModuleNotFoundError as exc:
+            _optional_import_error(
+                "The Detectron2 segmentation backend",
+                "Install Detectron2 using its upstream Windows/CUDA instructions.",
+                exc,
+            )
         return Detectron2Segmenter.from_zoo(**kwargs)
+
     if backend == "deeplab":
+        try:
+            from .deeplab import DeepLabSegmenter, load_deeplab_checkpoint
+        except ModuleNotFoundError as exc:
+            _optional_import_error(
+                "The DeepLab segmentation backend",
+                "Install the ML extra and ensure the local DeepLab `network` package is importable.",
+                exc,
+            )
+
         ckpt = kwargs.pop("ckpt_path")
-
-        # ── kwargs meant for the *loader* ───────────────────────────
-        loader_keys = {"model_name", "num_classes",
-                       "output_stride", "allow_pickle"}
+        loader_keys = {"model_name", "num_classes", "output_stride", "allow_pickle"}
         loader_kwargs = {k: kwargs.pop(k) for k in loader_keys if k in kwargs}
-
+        # Read, don't pop: the loader materialises the model on a device and the
+        # segmenter moves it again, so both need the caller's choice. Dropping it
+        # here left the loader on its own default and made --device cpu a no-op.
+        if "device" in kwargs:
+            loader_kwargs["device"] = kwargs["device"]
         dl = load_deeplab_checkpoint(ckpt, **loader_kwargs)
-
-        # remaining kwargs (e.g. sidewalk_class_id, device) go to Segmenter
         return DeepLabSegmenter(dl, **kwargs)
+
     raise ValueError(f"Unknown backend: {backend}")
 
-# ------------------------------------------------------------------ #
-#  DEPTH  FACTORY                                                    #
-# ------------------------------------------------------------------ #
+
 def build_depth(
     backend: Literal["midas", "zoe"] = "midas",
     variant: str | None = None,
     **kwargs: Any,
 ):
     """
-    Returns a depth-estimator instance with a `.predict(np.uint8 H×W×3)` method
+    Returns a depth-estimator instance with a `.predict(np.uint8 HxWx3)` method
     compatible with the rest of the pipeline.
-    
-    Parameters
-    ----------
-    backend : str
-        The depth estimation backend to use ("midas" or "zoe")
-    variant : str, optional
-        For ZoeDepth: "zoed_n", "zoed_k", "zoed_nk"
-        For MiDaS: model variant if supported
-    **kwargs
-        Additional arguments passed to the depth estimator
     """
     if backend == "midas":
+        try:
+            from .midas import MidasEstimator
+        except ModuleNotFoundError as exc:
+            _optional_import_error(
+                "The MiDaS depth backend",
+                'Install the ML extra with `python -m pip install -e ".[ml]"`.',
+                exc,
+            )
         return MidasEstimator(**kwargs)
 
     if backend == "zoe":
-        # Pass variant to ZoeDepth if provided
+        try:
+            from .zoe import ZoeDepthEstimator
+        except ModuleNotFoundError as exc:
+            _optional_import_error(
+                "The ZoeDepth backend",
+                'Install the ML extra with `python -m pip install -e ".[ml]"` and make '
+                "the ZoeDepth package available according to `docs/reproducibility.md`.",
+                exc,
+            )
+
         if variant is not None:
-            kwargs['variant'] = variant
+            kwargs["variant"] = variant
         return ZoeDepthEstimator(**kwargs)
 
     raise ValueError(f"Unknown depth backend: {backend}")

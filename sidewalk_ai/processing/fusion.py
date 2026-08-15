@@ -5,13 +5,13 @@ Mask-fusion helpers.
 All functions are **pure** (NumPy in → NumPy out, no prints, no I/O) so
 they slot cleanly into unit tests and the SidewalkPipeline.
 """
+
 from __future__ import annotations
 
 from typing import Literal, Sequence, Tuple
 
 import cv2
 import numpy as np
-
 
 __all__ = [
     "resize_like",
@@ -32,9 +32,7 @@ def resize_like(src: np.ndarray, ref: np.ndarray) -> np.ndarray:
         return src
 
     h, w = ref.shape[:2]
-    resized = cv2.resize(
-        src.astype("uint8"), (w, h), interpolation=cv2.INTER_NEAREST
-    )
+    resized = cv2.resize(src.astype("uint8"), (w, h), interpolation=cv2.INTER_NEAREST)
     return resized.astype(src.dtype)
 
 
@@ -66,7 +64,7 @@ def logical_fuse(
             raise ValueError("Masks must be 2-D (H×W)")
         stack.append(resize_like(m, ref).astype(bool))
 
-    arr = np.stack(stack, axis=0)            # (N, H, W)
+    arr = np.stack(stack, axis=0)  # (N, H, W)
 
     if method == "or":
         fused = arr.any(axis=0)
@@ -74,10 +72,10 @@ def logical_fuse(
         fused = arr.all(axis=0)
     elif method == "majority":
         fused = arr.sum(axis=0) > (len(masks) // 2)
-    else:                                   # pragma: no cover
+    else:  # pragma: no cover
         raise ValueError(f"Unknown method: {method}")
 
-    return fused.astype(np.uint8)            # 0/1 uint8
+    return fused.astype(np.uint8)  # 0/1 uint8
 
 
 # --------------------------------------------------------------------------- #
@@ -106,11 +104,11 @@ def weighted_soft_fuse(
         raise ValueError("No soft masks given")
 
     ref = soft_masks[0][0]
-    acc  = np.zeros_like(ref, dtype="float32")
+    acc = np.zeros_like(ref, dtype="float32")
     norm = 0.0
 
     for sm, w in soft_masks:
-        acc  += resize_like(sm, ref).astype("float32") * w
+        acc += resize_like(sm, ref).astype("float32") * w
         norm += w
 
     fused = (acc / norm) >= threshold

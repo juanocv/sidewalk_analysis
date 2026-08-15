@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidewalk-ai"
+version = "0.1.0"
+description = "Sidewalk width estimation and obstacle analysis from Street View imagery."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Diego Guerra" },
+  { name = "Juan Oliveira de Carvalho" },
+]
+dependencies = [
+  "joblib>=1.5",
+  "numpy>=2.0",
+  "opencv-python>=4.10",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "requests>=2.32",
+  "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+]
+dev = [
+  "black>=25.0",
+  "httpx>=0.27",  # fastapi.testclient
+  "pytest>=8.0",
+  "ruff>=0.8",
+]
+ml = [
+  "matplotlib>=3.9",
+  "pillow>=10.0",
+  # ZoeDepth builds its core through torch.hub("intel-isl/MiDaS"), whose hubconf
+  # imports timm, so the default `--depth zoe` cannot start without it.
+  # Upper bound: timm 1.x renamed the BEiT block internals (drop_path ->
+  # drop_path1/2) that MiDaS calls directly, and made relative_position_index a
+  # non-persistent buffer. Lower bound: 0.6.12 and older fail to import on
+  # Python 3.11+ (mutable dataclass default). That leaves 0.6.13 exactly, which
+  # is what ZoeDepth's own environment.yml pins (0.6.12) rounded up to the
+  # first version that runs on this project's supported Python.
+  "timm==0.6.13",
+  "torch",
+  "torchvision",
+  "transformers>=4.49",
+]
+
+[project.urls]
+Repository = "https://github.com/juanocv/sidewalk-analysis"
+
+[project.scripts]
+sidewalk-ai = "sidewalk_ai.cli.play:main"
+sidewalk-ai-diagnostics = "sidewalk_ai.diagnostics:main"
+
+[tool.setuptools.packages.find]
+include = ["sidewalk_ai*"]
+exclude = [
+  "generic*",
+  "prototype*",
+  "DeepLabV3Plus-Pytorch*",
+  "detectron2*",
+  "OneFormer*",
+  "ZoeDepth*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["sidewalk_ai/tests"]
+python_files = ["test_*.py"]
+# The default suite must stay offline, CPU-only and free of model downloads.
+# Run the excluded checks explicitly with `pytest -m gpu` / `pytest -m network`.
+addopts = "-q -m 'not gpu and not network'"
+markers = [
+  "gpu: requires GPU or heavyweight ML model downloads",
+  "network: requires external API access",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["sidewalk_ai"]
+extend-exclude = [
+  "DeepLabV3Plus-Pytorch",
+  "detectron2",
+  "generic",
+  "OneFormer",
+  "prototype",
+  "ZoeDepth",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F"]

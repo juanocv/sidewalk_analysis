@@ -1,7 +1,7 @@
 # sidewalk_ai/models/base.py
 from __future__ import annotations
 import numpy as np
-from typing import Protocol, Tuple, List
+from typing import Protocol, Tuple
 
 
 class SegmentInfo(Tuple[int, str]):  # (id, label)
@@ -18,28 +18,30 @@ class Segmenter(Protocol):
     seg_map      : (H,W)  int16 – panoptic id map   (optional for callers)
     seg_info     : list[SegmentInfo]               (optional)
     """
+
     def segment(
         self,
         img_rgb: np.ndarray,
         target_label: str | list[str] = "sidewalk",
         *,
         device: str | None = None,
-        ) -> tuple[
-        np.ndarray,                       # sidewalk mask
-        np.ndarray | None,                # seg_map / label map
-        list[SegmentInfo] | None,         # metadata
-        list[tuple[str, np.ndarray]]      # NEW – obstacles
-    ]:
-        ...
+    ) -> tuple[
+        np.ndarray,  # sidewalk mask
+        np.ndarray | None,  # seg_map / label map
+        list[SegmentInfo] | None,  # metadata
+        list[tuple[str, np.ndarray]],  # NEW – obstacles
+    ]: ...
+
 
 class DepthEstimator(Protocol):
     """
     Common behaviour for depth back-ends.
 
     `is_metric`
-        *True*  -> returned depth is already in **metres** (ZoeDepth).  
+        *True*  -> returned depth is already in **metres** (ZoeDepth).
         *False* -> needs ground-plane scaling (MiDaS, etc.).
     """
+
     is_metric: bool = False
 
     def predict(self, img_rgb: np.ndarray) -> np.ndarray: ...
