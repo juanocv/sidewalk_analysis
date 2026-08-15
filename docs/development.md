@@ -28,7 +28,7 @@ On Windows, the same baseline checks can be run with:
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
 
-CI runs the identical sequence on Linux for Python 3.11 and 3.13; see
+CI runs the identical sequence on Linux for Python 3.10 and 3.13; see
 `.github/workflows/checks.yml`. A pull request that leaves any of them red will fail.
 
 ## Testing Policy

@@ -7,7 +7,7 @@ name = "sidewalk-ai"
 version = "0.1.0"
 description = "Sidewalk width estimation and obstacle analysis from Street View imagery."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "Diego Guerra" },
@@ -82,11 +82,11 @@ markers = [
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py310"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 src = ["sidewalk_ai"]
 extend-exclude = [
   "DeepLabV3Plus-Pytorch",

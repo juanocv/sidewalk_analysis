@@ -6,7 +6,7 @@ one at a time.
 
 ## Supported Baseline
 
-- Python 3.11 or newer.
+- Python 3.10 or newer; CI covers 3.10 and 3.13.
 - Windows, Linux, or macOS for the base package.
 - CPU-only mode for tests and diagnostics.
 - CUDA GPU only when using heavy model backends that require it.
@@ -67,10 +67,10 @@ Install backend-specific packages separately when needed:
   which MiDaS calls directly, and made `relative_position_index` a non-persistent buffer
   that the published checkpoints still carry.
 - timm 0.6.12 and older fail to import on Python 3.11+ (mutable dataclass default in
-  `timm.models.maxxvit`), and this project requires 3.11.
+  `timm.models.maxxvit`), which rules them out over most of the supported range.
 
 ZoeDepth's own `environment.yml` pins 0.6.12; 0.6.13 is the first release that also runs
-on the supported Python. Loosen the pin only after checking both ends on a real image.
+across the whole supported Python range. Loosen the pin only after checking both ends on a real image.
 
 ### Detectron2 on Windows
 

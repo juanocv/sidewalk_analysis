@@ -32,14 +32,13 @@ as local external dependencies and are excluded from the Python package build.
 
 ## Setup
 
-Needs Python 3.11 or newer, on Windows, Linux or macOS. GPU model stacks may require a
-stricter Python/PyTorch/CUDA matrix, so install those backends according to their upstream
+Needs Python 3.10 or newer, on Windows, Linux or macOS — 3.10 is what Ubuntu 22.04 LTS
+ships, and CI tests both ends of that range. GPU model stacks may require a stricter
+Python/PyTorch/CUDA matrix, so install those backends according to their upstream
 documentation.
 
 **Linux** — Debian and Ubuntu do not ship `venv` with the interpreter, and OpenCV links
-against libGL, so install those first. Note that Ubuntu 22.04 LTS still ships Python 3.10,
-below this project's floor; use 24.04, or add the deadsnakes PPA and substitute `python3.11`
-for `python3` below.
+against libGL, so install those two first.
 
 ```bash
 sudo apt install python3-venv libgl1 libglib2.0-0
@@ -153,7 +152,8 @@ python -m sidewalk_ai.diagnostics --json
 Structured logs:
 
 ```bash
-sidewalk-ai --image generic/images/streetview_id1_heading0.jpg \n  --single-view --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg \
+  --single-view --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
 ```
 
 On PowerShell the line continuation is a backtick rather than a backslash:
@@ -179,7 +179,7 @@ Or through the helper that wraps all of them, including diagnostics:
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1     # Windows
 ```
 
-These same four checks run in CI on Linux for Python 3.11 and 3.13
+These same four checks run in CI on Linux for Python 3.10 and 3.13
 (`.github/workflows/checks.yml`).
 
 The default suite is unit-level: it never downloads models, calls Google APIs, or needs a GPU.
