@@ -8,7 +8,7 @@ tool for local experiments.
 
 The API needs both the `api` extra and a working model stack:
 
-```powershell
+```bash
 python -m pip install -e ".[api,ml]"
 uvicorn sidewalk_ai.webapi:app --host 127.0.0.1 --port 8000
 ```

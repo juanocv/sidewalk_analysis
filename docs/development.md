@@ -2,12 +2,24 @@
 
 ## Local Environment
 
+```bash
+# Linux/macOS. On Debian/Ubuntu: sudo apt install python3-venv libgl1 libglib2.0-0
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
 ```powershell
+# Windows
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
+
+`scripts/setup-dev.sh` and `scripts/setup-dev.ps1` wrap the same steps and take the
+optional layers as flags.
 
 Install optional ML dependencies only in environments prepared for the matching PyTorch/CUDA versions.
 
@@ -15,17 +27,19 @@ Install optional ML dependencies only in environments prepared for the matching 
 
 Run these before opening a pull request:
 
-```powershell
+```bash
 python -m compileall sidewalk_ai -q
 python -m pytest
 python -m ruff check sidewalk_ai
 python -m black --check sidewalk_ai
 ```
 
-On Windows, the same baseline checks can be run with:
+The helper scripts run the same sequence plus diagnostics, and stop at the first
+failing gate:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```bash
+./scripts/check.sh                                              # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1     # Windows
 ```
 
 CI runs the identical sequence on Linux for Python 3.10 and 3.13; see

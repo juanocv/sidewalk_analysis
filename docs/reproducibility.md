@@ -16,38 +16,38 @@ Detectron2, OneFormer, and ZoeDepth have OS/GPU-specific installation constraint
 
 ## Install Layers
 
-Base development install:
+Base development install.
+
+```bash
+# Linux/macOS. Debian and Ubuntu ship neither venv nor libGL with the interpreter:
+#   sudo apt install python3-venv libgl1 libglib2.0-0
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
 
 ```powershell
+# Windows
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Windows helper:
+The helpers wrap the same steps and take the optional layers as flags:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1
+```bash
+./scripts/setup-dev.sh --api --ml                                                  # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1 -WithApi -WithMl   # Windows
 ```
 
-API-only additions:
+The extras themselves are shell-independent:
 
-```powershell
-python -m pip install -e ".[api]"
-```
-
-Generic ML additions:
-
-```powershell
-python -m pip install -e ".[ml]"
-```
-
-For a new workstation intended to run the README examples, install both layers in the same
-environment:
-
-```powershell
-python -m pip install -e ".[dev,ml]"
+```bash
+python -m pip install -e ".[api]"      # API only
+python -m pip install -e ".[ml]"       # generic ML layer
+python -m pip install -e ".[dev,ml]"   # a workstation meant to run the README examples
 ```
 
 Install backend-specific packages separately when needed:
@@ -72,10 +72,25 @@ Install backend-specific packages separately when needed:
 ZoeDepth's own `environment.yml` pins 0.6.12; 0.6.13 is the first release that also runs
 across the whole supported Python range. Loosen the pin only after checking both ends on a real image.
 
-### Detectron2 on Windows
+### Detectron2
 
-Detectron2 has no Windows wheels and builds C++ extensions from source. This recipe
-works on Windows 11 / Python 3.13 / torch 2.6.0+cu118, from a Developer environment:
+Detectron2 publishes no wheels and builds C++ extensions from source on every platform,
+so it always needs a compiler and the Python development headers.
+
+**Linux** — install the toolchain first. On a stock Ubuntu, `g++` is present but
+`Python.h` is not, and the build fails without it:
+
+```bash
+sudo apt install build-essential python3-dev
+python -m pip install "setuptools<81"
+CUDA_VISIBLE_DEVICES=-1 python -m pip install --no-build-isolation path/to/detectron2
+```
+
+Linux is Detectron2's supported platform, so the build is otherwise unremarkable; the
+recipe below was the one that needed working out.
+
+**Windows** — verified on Windows 11 / Python 3.13 / torch 2.6.0+cu118, from a
+Developer environment:
 
 ```powershell
 # 1. MSVC C++ build tools must be on the environment
@@ -88,12 +103,14 @@ python -m pip install --no-build-isolation path\to\detectron2
 
 Two things that are easy to get wrong:
 
-- **Hiding the GPU is what selects a CPU-only extension build.** Detectron2 compiles CUDA
-  ops when `torch.cuda.is_available() and CUDA_HOME`, and on Windows torch discovers
-  `CUDA_HOME` by globbing `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*` — so
-  clearing `CUDA_HOME`, `CUDA_PATH` and `FORCE_CUDA` is *not* enough. If the installed
-  CUDA toolkit does not match the one torch was built against (12.8 vs 11.8 here), the
-  build aborts with a version-mismatch error.
+- **Hiding the GPU is what selects a CPU-only extension build**, on either platform.
+  Detectron2 compiles CUDA ops when `torch.cuda.is_available() and CUDA_HOME`, and on
+  Windows torch discovers `CUDA_HOME` by globbing
+  `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*` — so clearing `CUDA_HOME`,
+  `CUDA_PATH` and `FORCE_CUDA` is *not* enough there. If the installed CUDA toolkit does
+  not match the one torch was built against (12.8 vs 11.8 here), the build aborts with a
+  version-mismatch error. Skip `CUDA_VISIBLE_DEVICES=-1` when the toolkit and the torch
+  build do agree and you want the CUDA kernels.
 - **`setuptools` must be older than 81.** Detectron2 0.6 imports `pkg_resources`, which
   setuptools removed in 81: `python -m pip install "setuptools<81"`.
 
@@ -113,11 +130,20 @@ with one command.
 
 Pin the checkout and expose it to the virtualenv only:
 
-```powershell
+```bash
+# Linux/macOS
 git clone https://github.com/VainF/DeepLabV3Plus-Pytorch.git
 git -C DeepLabV3Plus-Pytorch checkout 4e1087d   # pin for reproducibility
 
 # one line, the absolute path to the checkout
+echo "$PWD/DeepLabV3Plus-Pytorch"   > "$(python -c 'import site; print(site.getsitepackages()[0])')/deeplabv3plus-checkout.pth"
+```
+
+```powershell
+# Windows
+git clone https://github.com/VainF/DeepLabV3Plus-Pytorch.git
+git -C DeepLabV3Plus-Pytorch checkout 4e1087d
+
 "$PWD\DeepLabV3Plus-Pytorch" | Out-File -Encoding ascii `
   .venv\Lib\site-packages\deeplabv3plus-checkout.pth
 ```
@@ -125,11 +151,12 @@ git -C DeepLabV3Plus-Pytorch checkout 4e1087d   # pin for reproducibility
 Then download `best_deeplabv3plus_mobilenet_cityscapes_os16.pth` from the upstream
 README and pass it with `--ckpt`, matching `--deeplab-model` to the backbone:
 
-```powershell
-sidewalk-ai --image path\to\frame.jpg --single-view `
-  --seg deeplab --ckpt path\to\best_deeplabv3plus_mobilenet_cityscapes_os16.pth `
-  --deeplab-model deeplabv3plus_mobilenet
+```bash
+sidewalk-ai --image path/to/frame.jpg --single-view   --seg deeplab --ckpt path/to/best_deeplabv3plus_mobilenet_cityscapes_os16.pth
 ```
+
+`--deeplab-model` is optional: the architecture is read from the checkpoint filename when
+it is omitted. Pass it when the name carries no recognisable architecture.
 
 Why a `.pth` file rather than `pip install`:
 
@@ -139,6 +166,7 @@ Why a `.pth` file rather than `pip install`:
   `datasets` being Hugging Face's.
 - A `.pth` is scoped to one virtualenv, unlike `PYTHONPATH`, and its entry lands
   *after* site-packages in `sys.path`, so a genuinely installed package still wins.
+  Checked on both platforms: the checkout sits at a higher index than site-packages.
 
 ### DeepLab reports no obstacles on Street View frames
 
@@ -229,14 +257,14 @@ back-end's output convention, so re-derive it whenever the depth model changes.
 
 Run diagnostics before loading any model weights:
 
-```powershell
+```bash
 python -m sidewalk_ai.diagnostics
 python -m sidewalk_ai.diagnostics --json
 ```
 
 After editable installation, this console script is also available:
 
-```powershell
+```bash
 sidewalk-ai-diagnostics
 ```
 
@@ -249,7 +277,15 @@ Logging is centralized under the `sidewalk_ai` logger.
 
 Environment configuration:
 
+```bash
+# Linux/macOS
+export SWAI_LOG_LEVEL=DEBUG
+export SWAI_LOG_FORMAT=json
+export SWAI_LOG_FILE=debug_out/pipeline.jsonl
+```
+
 ```powershell
+# Windows
 $env:SWAI_LOG_LEVEL = "DEBUG"
 $env:SWAI_LOG_FORMAT = "json"
 $env:SWAI_LOG_FILE = "debug_out/pipeline.jsonl"
@@ -257,10 +293,12 @@ $env:SWAI_LOG_FILE = "debug_out/pipeline.jsonl"
 
 CLI configuration:
 
-```powershell
-sidewalk-ai --image generic/images/streetview_id1_heading0.jpg `
-  --single-view --device cpu --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
+```bash
+sidewalk-ai --image generic/images/streetview_id1_heading0.jpg \
+  --single-view --log-level DEBUG --log-format json --log-file debug_out/run.jsonl
 ```
+
+PowerShell continues a line with a backtick instead of a backslash.
 
 Use `--debug` only when image/debug artifacts are needed. Use `--log-level DEBUG` when textual
 diagnostics are enough.
@@ -269,7 +307,14 @@ diagnostics are enough.
 
 Use explicit cache directories for reproducible machines and CI runners:
 
+```bash
+# Linux/macOS
+export TORCH_HOME=/opt/models/torch
+export HF_HOME=/opt/models/huggingface
+```
+
 ```powershell
+# Windows
 $env:TORCH_HOME = "C:\models\torch"
 $env:HF_HOME = "C:\models\huggingface"
 ```
@@ -281,7 +326,7 @@ weights, generated debug images, or local API keys.
 
 Before debugging model-specific issues, confirm the base package:
 
-```powershell
+```bash
 python -m compileall sidewalk_ai -q
 python -m pytest
 python -m ruff check sidewalk_ai
@@ -289,8 +334,9 @@ python -m black --check sidewalk_ai
 python -m sidewalk_ai.diagnostics
 ```
 
-Windows helper:
+The helpers run exactly that sequence and stop at the first failing gate:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```bash
+./scripts/check.sh                                              # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1     # Windows
 ```
