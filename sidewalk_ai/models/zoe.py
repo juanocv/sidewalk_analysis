@@ -67,12 +67,19 @@ class ZoeDepthEstimator:
         # checkpoint still carries -> "Unexpected key(s) in state_dict".
         # The weights are applied below instead, tolerantly, which also avoids
         # downloading and loading the same checkpoint twice.
+        # trust_repo=True is what keeps this runnable without a terminal. Left
+        # unset, torch.hub asks for confirmation the first time it caches a
+        # GitHub repo, and with no TTY -- a script, CI, or any redirected run --
+        # the prompt fails as a bare "EOFError: EOF when reading a line" that
+        # names neither ZoeDepth nor trust. The repo is not user-supplied: the
+        # github branch above hardcodes isl-org/ZoeDepth.
         self.model = (
             torch.hub.load(
                 hub_repo,
                 _VARIANTS[variant],
                 source="local" if source == "local" else "github",
                 pretrained=False,
+                trust_repo=True,
             )
             .to(self.device)
             .eval()

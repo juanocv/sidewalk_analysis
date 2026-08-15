@@ -68,9 +68,26 @@ python -m pip install -e ".[ml]"
 
 That layer pins `timm`, which ZoeDepth needs, but PyTorch itself is left to you: install the
 CPU or CUDA build that matches your machine from
-[pytorch.org](https://pytorch.org/get-started/locally/). Detectron2 and the DeepLab checkout
-have their own steps, described in
-[`docs/reproducibility.md`](docs/reproducibility.md).
+[pytorch.org](https://pytorch.org/get-started/locally/).
+
+Which build that is comes down to one question — does the machine have an NVIDIA GPU?
+
+```bash
+nvidia-smi     # prints a table with a driver version, or "command not found"
+```
+
+No output means no usable GPU, so take the CPU build and run every example below with
+`--device cpu`. Two things that look like evidence of a GPU are not: an `nvcc` on the
+`PATH` is just the `nvidia-cuda-toolkit` apt package, and `libcuda.so` can be left behind
+by `libnvidia-compute-*` with no hardware or kernel module under it. The CUDA wheels bundle
+their own runtime anyway, so a system CUDA version never has to match the wheel you pick —
+only the driver has to be new enough.
+
+Detectron2 and the DeepLab checkout have their own steps, described in
+[`docs/reproducibility.md`](docs/reproducibility.md). Detectron2 in particular compiles from
+source and needs a toolchain that a stock Ubuntu does not have
+(`sudo apt install build-essential python3-dev`). OneFormer and ZoeDepth need no separate
+install.
 
 A helper does the venv and the install in one step, with the optional layers behind flags:
 
@@ -98,6 +115,17 @@ This default command uses `--seg oneformer --depth zoe`, which requires the opti
 the corresponding model assets. Add `--debug` only after installing debug/backend visualization
 dependencies.
 
+The first run downloads those assets and nothing warns you beforehand: roughly 1.7 GB for
+OneFormer into `HF_HOME`, plus ~1.3 GB for ZoeDepth into `TORCH_HOME` (`--depth midas` pulls
+~1.5 GB there instead). They are cached, so only the first run pays. Set both variables first
+if the default `~/.cache` is not where they belong — see
+[`docs/reproducibility.md`](docs/reproducibility.md#model-cache-hygiene).
+
+Expect tens of seconds per frame on CPU, not seconds. Measured on one laptop CPU, single view:
+this default command takes about 53 s end to end, and about 22 s with `--depth midas` instead.
+Segmentation is the smaller half — roughly 16 s for OneFormer, against 0.6 s for DeepLab with
+the MobileNet checkpoint.
+
 Coordinates:
 
 ```bash
@@ -109,6 +137,10 @@ Address:
 ```bash
 sidewalk-ai "Av. Paulista 1578, Sao Paulo" --multi-view --device cuda
 ```
+
+Those two examples name `--device cuda`, which fails loudly on a machine without a usable GPU
+rather than falling back. Swap it for `--device cpu`, or drop the flag entirely: the default is
+`--device auto`, which picks CUDA when the installed PyTorch can and CPU otherwise.
 
 Use `--debug --outdir debug_out` to write diagnostic images.
 

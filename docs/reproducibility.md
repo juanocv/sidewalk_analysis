@@ -54,8 +54,9 @@ Install backend-specific packages separately when needed:
 
 - PyTorch: install the CPU or CUDA build that matches the machine.
 - Detectron2: install a build compatible with the local PyTorch/CUDA/OS matrix.
-- OneFormer: install its upstream dependencies and model assets.
-- ZoeDepth: install or clone the backend according to the target environment.
+- OneFormer: no separate step. `transformers` ships the architecture and the
+  weights come from the Hub on first use.
+- ZoeDepth: no separate step either — see below.
 
 ### The timm pin
 
@@ -72,13 +73,42 @@ Install backend-specific packages separately when needed:
 ZoeDepth's own `environment.yml` pins 0.6.12; 0.6.13 is the first release that also runs
 across the whole supported Python range. Loosen the pin only after checking both ends on a real image.
 
+### ZoeDepth
+
+Nothing to clone and nothing to install. Unlike Detectron2 and DeepLab, the
+adapter fetches the backend itself through
+`torch.hub.load("isl-org/ZoeDepth", ...)`, which caches the repository under
+`TORCH_HOME` on first use and puts `zoedepth` on `sys.path` from there. The `ml`
+extra plus PyTorch is the whole requirement.
+
+Two consequences worth knowing:
+
+- `python -m sidewalk_ai.diagnostics` reports `zoedepth_local missing` until the
+  first run populates the hub cache. That line describes the cache, not a missing
+  install step, and `--depth zoe` works regardless.
+- The first run downloads the repository and the variant's checkpoint (~1.3 GB for
+  the default `zoed_n`). Point `TORCH_HOME` somewhere deliberate before that if the
+  machine is shared — see [Model Cache Hygiene](#model-cache-hygiene).
+
+The adapter passes `trust_repo=True`. Without it `torch.hub` prompts for
+confirmation the first time it caches a GitHub repo, and a run with no TTY dies
+as `EOFError: EOF when reading a line` from inside torch, naming neither ZoeDepth
+nor trust.
+
 ### Detectron2
 
 Detectron2 publishes no wheels and builds C++ extensions from source on every platform,
 so it always needs a compiler and the Python development headers.
 
-**Linux** — install the toolchain first. On a stock Ubuntu, `g++` is present but
-`Python.h` is not, and the build fails without it:
+**Linux** — install the toolchain first. Neither piece is guaranteed: a stock Ubuntu
+22.04 desktop had no `g++` at all, and even where the compiler is present `Python.h`
+comes from `python3-dev` separately. The build fails on whichever is missing, and the
+second failure only appears after fixing the first:
+
+```text
+error: command 'x86_64-linux-gnu-g++' failed: No such file or directory
+fatal error: Python.h: No such file or directory
+```
 
 ```bash
 sudo apt install build-essential python3-dev
