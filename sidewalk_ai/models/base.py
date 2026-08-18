@@ -32,12 +32,19 @@ class SegmentationOutput:
         ``(label, H×W bool)`` pairs the back-end found itself. Only consulted
         when *seg_map* is ``None``; otherwise the pipeline derives obstacles
         from the map so every back-end goes through the same rules.
+    ignore_labels, sidewalk_labels
+        Which names in *seg_info* are background and which are the target.
+        They travel with the map because they describe it: ADE20K's 150
+        classes and Cityscapes' 19 do not share a vocabulary. ``None`` means
+        the ADE20K-shaped defaults in ``models._obstacles``.
     """
 
     mask: np.ndarray
     seg_map: np.ndarray | None = None
     seg_info: list[SegmentInfo] | None = None
     obstacles: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    ignore_labels: frozenset[str] | None = None
+    sidewalk_labels: frozenset[str] | None = None
 
     @classmethod
     def coerce(cls, value: Any, *, source: str | None = None) -> "SegmentationOutput":

@@ -188,6 +188,22 @@ def _accessibility_to_dict(metrics):
     }
 
 
+def _accessibility_line(stats, threshold, mid_threshold, obstacle_text=None):
+    """
+    One line of accessibility summary.
+
+    Zero obstacles leaves the corridor median at NaN, which printed as
+    "Median corridor=nan m" next to the most favourable rating -- indistinguishable
+    from a detector that found nothing because it could not. Say which it is.
+    """
+    obstacles = obstacle_text or f"Obstacles={stats.total_obstacles}"
+    rank = f"Rank={stats.rating} (II>={mid_threshold:.2f} m, III>={threshold:.2f} m)"
+    if stats.total_obstacles == 0:
+        return f"  {obstacles} | no obstacle found on the sidewalk, corridor assumed clear | {rank}"
+    median = stats.free_total_m.get("median", float("nan"))
+    return f"  {obstacles} | Median corridor={median:.2f} m | {rank}"
+
+
 def _print_result(result, args):
     """Print a single-view result (or the middle estimate of a side)."""
     if result is None:
@@ -216,12 +232,7 @@ def _print_result(result, args):
         mid_threshold = MID_RATIO * threshold
         metrics = compute_single_view_metrics(chosen.clearances, min_clear_required_m=threshold)
         stats = metrics.global_stats
-        median = stats.free_total_m.get("median", float("nan"))
-        print(
-            f"  Obstacles={stats.total_obstacles} | "
-            f"Median corridor={median:.2f} m | "
-            f"Rank={stats.rating} (II>={mid_threshold:.2f} m, III>={threshold:.2f} m)"
-        )
+        print(_accessibility_line(stats, threshold, mid_threshold))
         if metrics.per_type:
             print("  Per-type corridor medians (m):")
             for name, per_type in metrics.per_type.items():
@@ -326,11 +337,11 @@ def _print_tuple_results(result, args, pipe, segmenter, multi_view_meta):
                 or stats.avg_obstacles_per_view
                 or stats.total_obstacles
             )
-            median = stats.free_total_m.get("median", float("nan"))
             print(
-                f"  {side:<5} -> Obstacles~{average} (avg/view) | "
-                f"Median corridor={median:.2f} m | "
-                f"Rank={stats.rating} (II>={mid_threshold:.2f} m, III>={threshold:.2f} m)"
+                f"  {side:<5} ->"
+                + _accessibility_line(
+                    stats, threshold, mid_threshold, obstacle_text=f"Obstacles~{average} (avg/view)"
+                )
             )
 
         if getattr(args, "metrics_json", None):

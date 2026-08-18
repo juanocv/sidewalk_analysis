@@ -7,7 +7,7 @@ import numpy as np
 
 from sidewalk_ai.processing.fusion import logical_fuse
 
-from .base import SegmentationOutput, Segmenter, SegmentInfo
+from .base import SegmentationOutput, Segmenter
 
 FuseMethod = Literal["or", "and", "majority"]
 _METHODS: tuple[str, ...] = ("or", "and", "majority")
@@ -50,21 +50,32 @@ class EnsembleSegmenter(Segmenter):
 
         fused = logical_fuse([out.mask for out in outputs], method=self.method).astype(bool)
 
-        seg_map, seg_info = _first_panoptic(outputs, fused.shape)
+        source = _first_panoptic(outputs, fused.shape)
+        seg_map = source.seg_map if source else None
+        seg_info = source.seg_info if source else None
 
         # With a panoptic map available the pipeline rebuilds obstacles from it
         # and ignores this list, so only bother when there is none.
         obstacles = [] if seg_map is not None else _merge_obstacles(outputs, fused)
 
-        return SegmentationOutput(fused, seg_map, seg_info, obstacles)
+        # The vocabulary has to come from the same member as the map: another
+        # member's label space would not describe these ids.
+        return SegmentationOutput(
+            fused,
+            seg_map,
+            seg_info,
+            obstacles,
+            ignore_labels=source.ignore_labels if source else None,
+            sidewalk_labels=source.sidewalk_labels if source else None,
+        )
 
 
 def _first_panoptic(
     outputs: Sequence[SegmentationOutput],
     shape: tuple[int, ...],
-) -> tuple[np.ndarray | None, list[SegmentInfo] | None]:
+) -> SegmentationOutput | None:
     """
-    Panoptic map of the first member that has one matching the fused shape.
+    The first member whose panoptic map matches the fused shape.
 
     A member whose map is a different size was resized during fusion, so its
     segment ids would no longer line up with the fused mask; skip it rather
@@ -75,8 +86,8 @@ def _first_panoptic(
             continue
         if tuple(np.shape(out.seg_map)[:2]) != tuple(shape):
             continue
-        return out.seg_map, out.seg_info
-    return None, None
+        return out
+    return None
 
 
 def _merge_obstacles(

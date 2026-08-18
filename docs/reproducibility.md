@@ -198,25 +198,39 @@ Why a `.pth` file rather than `pip install`:
   *after* site-packages in `sys.path`, so a genuinely installed package still wins.
   Checked on both platforms: the checkout sits at a higher index than site-packages.
 
-### DeepLab reports no obstacles on Street View frames
+### DeepLab finds far fewer obstacles than OneFormer
 
-Measured on three sample frames: DeepLab estimates width normally (5.00 m, 2.61 m,
-2.68 m) but returns **zero obstacles** on all of them, where OneFormer finds a tree
-on the sidewalk in the same frame. This is not a threshold that can be tuned — the
-`vegetation` region has literally no pixel adjacent to DeepLab's sidewalk mask.
+Across ten sampled frames, only two Cityscapes classes ever became obstacles:
+`pole` in one frame and `vegetation` in three. OneFormer finds obstacles on frames
+where DeepLab reports none, so their accessibility figures are **not directly
+comparable**; treat DeepLab primarily as a width-estimation baseline.
 
-It follows from Cityscapes' 19 coarse classes:
+The cause is the label space, not a threshold. Cityscapes has 19 coarse classes
+against ADE20K's 150:
 
-- What OneFormer labels `grass` maps to `terrain`, which `models/_obstacles.py`
-  ignores as ground.
-- Cityscapes is semantic, not panoptic, so every tree in the frame merges into one
-  `vegetation` region whose contact with the sidewalk depends on where the trunk
-  was classified.
+- What OneFormer calls `grass` is `terrain` in Cityscapes, and `terrain` is
+  ignored as ground. That single mapping accounts for most of the gap.
+- Cityscapes is semantic, not panoptic, so every tree in a frame merges into one
+  `vegetation` region, and whether it counts depends on where the trunk landed.
 
-Because "no obstacles" resolves to `meets_ratio = 1.0` and rating `III`, DeepLab's
-accessibility figures are **not comparable** with the other backends: it contributes
-a width estimate but always the most favourable rating. Treat it as a
-width-estimation baseline unless the obstacle vocabulary is revisited.
+Classes that touch the sidewalk but are ignored, over the same ten frames:
+`road` (7), `wall` (5), `terrain` (4), `car` (4), `fence` (3), `building` (2),
+`person` (1). `road`, `wall`, `building` and `fence` bound the sidewalk rather than
+obstruct it, so ignoring them is right. `car` is the one worth revisiting against
+ground truth: a car parked on the sidewalk is a real barrier, though touching the
+kerb is not the same as blocking the path.
+
+The vocabulary is no longer hardcoded. `SegmentationOutput` carries
+`ignore_labels` and `sidewalk_labels` alongside the map they describe, so a
+back-end declares the set for its own label space -- `models/deeplab.py` spells
+out the Cityscapes one -- and `extract_obstacles` takes both as arguments. Tuning
+the trade-off above is a matter of editing that set, with no change to shared code.
+
+Note also that zero obstacles resolves to `meets_ratio = 1.0` and rating `III`.
+The CLI now says "no obstacle found on the sidewalk, corridor assumed clear"
+rather than printing a bare `nan` median next to the best possible rating, since
+the two are otherwise indistinguishable from a detector that found nothing
+because it could not.
 
 ### Known-benign warnings
 

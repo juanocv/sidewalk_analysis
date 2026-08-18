@@ -86,3 +86,28 @@ def test_the_error_names_the_offending_back_end():
 def test_a_non_sequence_is_rejected_without_a_len_crash():
     with pytest.raises(TypeError, match="returned ndarray"):
         SegmentationOutput.coerce(_mask(), source="MySegmenter")
+
+
+# --------------------------------------------------------------------------- #
+# the obstacle vocabulary travels with the map                                #
+# --------------------------------------------------------------------------- #
+def test_the_vocabulary_defaults_to_none_meaning_the_shared_one():
+    out = SegmentationOutput(_mask())
+
+    assert out.ignore_labels is None and out.sidewalk_labels is None
+
+
+def test_a_back_end_can_declare_its_own_label_space():
+    out = SegmentationOutput(
+        _mask(),
+        ignore_labels=frozenset({"road", "terrain"}),
+        sidewalk_labels=frozenset({"sidewalk"}),
+    )
+
+    assert "terrain" in out.ignore_labels
+
+
+def test_coercing_a_legacy_tuple_leaves_the_vocabulary_unset():
+    out = SegmentationOutput.coerce((_mask(), None, None))
+
+    assert out.ignore_labels is None

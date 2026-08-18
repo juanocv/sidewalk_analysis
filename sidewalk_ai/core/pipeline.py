@@ -606,7 +606,15 @@ class SidewalkPipeline:
         # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
         # do mapa panóptico – robusto contra copas coladas:
         if seg_map is not None and seg_info is not None:
-            obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
+            # The vocabulary travels with the map: a back-end that declares
+            # one for its own label space overrides the ADE20K defaults.
+            obstacles = extract_obstacles(
+                seg_map,
+                seg_info,
+                refined_mask,
+                ignore_labels=out.ignore_labels,
+                sidewalk_labels=out.sidewalk_labels,
+            )
         # caso extremo: sem panoptic disponível, mantém os do segmenter
         logger.info("Obstacle extraction took %.4f seconds", time.time() - initial_time)
 
