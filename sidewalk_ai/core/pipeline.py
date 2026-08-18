@@ -413,7 +413,11 @@ class SidewalkPipeline:
                 req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
                 # t0 = time.time()
                 img_path = self.sv.fetch(req)
-                img_rgb = read_rgb(img_path)
+                # crop_bar=False regardless of SWAI_IMG_AUTO_CROP_GOOGLE_LOGO: this pipeline
+                # handles the logo strip by ignoring rows, not removing them (bottom_ignore_px
+                # for width, NaN for depth). Letting read_rgb crop as well would take the
+                # strip off three times over and shift every row against the depth map.
+                img_rgb = read_rgb(img_path, crop_bar=False)
 
                 out = self.segmenter.segment(img_rgb)
                 sidewalk_mask = out[0]
@@ -563,7 +567,11 @@ class SidewalkPipeline:
             initial_time = self.initial_time
         if initial_time is None:
             initial_time = time.time()
-        img_rgb = read_rgb(img_path)
+        # crop_bar=False regardless of SWAI_IMG_AUTO_CROP_GOOGLE_LOGO: this pipeline
+        # handles the logo strip by ignoring rows, not removing them (bottom_ignore_px
+        # for width, NaN for depth). Letting read_rgb crop as well would take the
+        # strip off three times over and shift every row against the depth map.
+        img_rgb = read_rgb(img_path, crop_bar=False)
 
         # -------- Mask Segmentation -------- #
         obstacles = []
