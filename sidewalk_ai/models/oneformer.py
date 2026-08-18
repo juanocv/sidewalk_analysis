@@ -6,7 +6,7 @@ import torch
 from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
 
 from sidewalk_ai.processing.refinement import shave_above_top_envelope
-from .base import Segmenter, SegmentInfo
+from .base import SegmentationOutput, Segmenter, SegmentInfo
 
 
 class OneFormerSegmenter(Segmenter):
@@ -184,4 +184,4 @@ class OneFormerSegmenter(Segmenter):
             min_cols=30,
         ).astype(bool)
 
-        return mask, seg_map, seg_info, obstacles
+        return SegmentationOutput(mask, seg_map, seg_info, obstacles)

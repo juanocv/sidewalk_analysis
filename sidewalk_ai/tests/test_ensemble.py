@@ -42,14 +42,14 @@ def _panoptic():
 # --------------------------------------------------------------------------- #
 def test_or_takes_the_union():
     a, b = _mask(slice(5, 30)), _mask(slice(25, 55))
-    fused, _, _, _ = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="or").segment(None)
+    fused = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="or").segment(None).mask
 
     assert np.array_equal(fused, a | b)
 
 
 def test_and_takes_the_intersection():
     a, b = _mask(slice(5, 30)), _mask(slice(25, 55))
-    fused, _, _, _ = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="and").segment(None)
+    fused = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="and").segment(None).mask
 
     assert np.array_equal(fused, a & b)
 
@@ -59,10 +59,10 @@ def test_majority_is_accepted_and_needs_three_to_differ_from_and():
     # ensemble rejected anything but or/and, raising at construction time.
     a, b, c = _mask(slice(5, 30)), _mask(slice(25, 55)), _mask(slice(5, 55))
 
-    two = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="majority").segment(None)[0]
-    three = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), FakeSeg(c), method="majority").segment(None)[
-        0
-    ]
+    two = EnsembleSegmenter(FakeSeg(a), FakeSeg(b), method="majority").segment(None).mask
+    three = (
+        EnsembleSegmenter(FakeSeg(a), FakeSeg(b), FakeSeg(c), method="majority").segment(None).mask
+    )
 
     assert np.array_equal(two, a & b)  # degenerate with two members
     assert np.array_equal(three, (a & b) | (a & c) | (b & c))
@@ -87,7 +87,8 @@ def test_panoptic_map_reaches_the_caller():
     a = FakeSeg(_mask(slice(5, 30)), seg_map, seg_info)
     b = FakeSeg(_mask(slice(25, 55)))
 
-    _, out_map, out_info, _ = EnsembleSegmenter(a, b).segment(None)
+    out = EnsembleSegmenter(a, b).segment(None)
+    out_map, out_info = out.seg_map, out.seg_info
 
     # Previously this returned (fused, None, None, []), so the pipeline skipped
     # obstacle extraction and reported a perfectly clear sidewalk.
@@ -101,7 +102,8 @@ def test_panoptic_map_is_taken_from_the_second_member_when_the_first_has_none():
     a = FakeSeg(_mask(slice(5, 30)), arity=3)
     b = FakeSeg(_mask(slice(25, 55)), seg_map, seg_info)
 
-    _, out_map, out_info, _ = EnsembleSegmenter(a, b).segment(None)
+    out = EnsembleSegmenter(a, b).segment(None)
+    out_map, out_info = out.seg_map, out.seg_info
 
     assert np.array_equal(out_map, seg_map)
     assert out_info == seg_info
@@ -112,7 +114,8 @@ def test_misaligned_panoptic_map_is_dropped_rather_than_misapplied():
     a = FakeSeg(_mask(slice(5, 30)), seg_map, [(1, "sidewalk")])
     b = FakeSeg(_mask(slice(25, 55)))
 
-    _, out_map, out_info, _ = EnsembleSegmenter(a, b).segment(None)
+    out = EnsembleSegmenter(a, b).segment(None)
+    out_map, out_info = out.seg_map, out.seg_info
 
     assert out_map is None
     assert out_info is None
@@ -130,7 +133,8 @@ def test_obstacles_are_pooled_when_no_panoptic_map_exists():
     a = FakeSeg(_mask(slice(5, 30)), obstacles=[("tree", tree)])
     b = FakeSeg(_mask(slice(25, 55)), obstacles=[("kite", off_sidewalk)])
 
-    _, out_map, _, obstacles = EnsembleSegmenter(a, b).segment(None)
+    out = EnsembleSegmenter(a, b).segment(None)
+    out_map, obstacles = out.seg_map, out.obstacles
 
     assert out_map is None
     labels = [label for label, _ in obstacles]
@@ -141,7 +145,8 @@ def test_three_tuple_members_are_accepted():
     a = FakeSeg(_mask(slice(5, 30)), arity=3)
     b = FakeSeg(_mask(slice(25, 55)), arity=3)
 
-    fused, _, _, obstacles = EnsembleSegmenter(a, b).segment(None)
+    out = EnsembleSegmenter(a, b).segment(None)
+    fused, obstacles = out.mask, out.obstacles
 
     assert fused.any()
     assert obstacles == []

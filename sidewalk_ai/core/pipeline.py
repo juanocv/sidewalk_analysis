@@ -22,7 +22,7 @@ from sidewalk_ai.processing.geometry import (
     to_metric_depth,
 )
 from sidewalk_ai.processing.fusion import logical_fuse
-from sidewalk_ai.models.base import Segmenter
+from sidewalk_ai.models.base import SegmentationOutput, Segmenter
 from sidewalk_ai.log import debug_event, get_logger
 
 logger = get_logger(__name__)
@@ -419,8 +419,10 @@ class SidewalkPipeline:
                 # strip off three times over and shift every row against the depth map.
                 img_rgb = read_rgb(img_path, crop_bar=False)
 
-                out = self.segmenter.segment(img_rgb)
-                sidewalk_mask = out[0]
+                out = SegmentationOutput.coerce(
+                    self.segmenter.segment(img_rgb), source=type(self.segmenter).__name__
+                )
+                sidewalk_mask = out.mask
                 if isinstance(sidewalk_mask, Iterable) and not isinstance(
                     sidewalk_mask, np.ndarray
                 ):
@@ -574,21 +576,14 @@ class SidewalkPipeline:
         img_rgb = read_rgb(img_path, crop_bar=False)
 
         # -------- Mask Segmentation -------- #
-        obstacles = []
-        out = self.segmenter.segment(img_rgb)
-        if len(out) == 3:
-            sidewalk_mask, seg_map, seg_info = out  # detectron2, oneformer
-        elif len(out) == 4:
-            sidewalk_mask, seg_map, seg_info, obstacles = out  # deeplab, ensemble
-        else:
-            # Falling through used to leave every name below unbound, so the
-            # real failure surfaced 20 lines later as a confusing NameError.
-            raise TypeError(
-                f"{type(self.segmenter).__name__}.segment() returned {len(out)} values; "
-                "expected (mask, seg_map, seg_info) or (mask, seg_map, seg_info, obstacles)"
-            )
+        out = SegmentationOutput.coerce(
+            self.segmenter.segment(img_rgb), source=type(self.segmenter).__name__
+        )
+        sidewalk_mask, seg_map, seg_info = out.mask, out.seg_map, out.seg_info
+        obstacles = out.obstacles
 
-        # Some back-ends (ensemble) may return a tuple of masks
+        # A back-end may still hand back several candidate masks to fuse here
+        # rather than fusing them itself, as EnsembleSegmenter does.
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 

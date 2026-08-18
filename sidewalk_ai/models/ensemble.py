@@ -7,12 +7,10 @@ import numpy as np
 
 from sidewalk_ai.processing.fusion import logical_fuse
 
-from .base import Segmenter, SegmentInfo
+from .base import SegmentationOutput, Segmenter, SegmentInfo
 
 FuseMethod = Literal["or", "and", "majority"]
 _METHODS: tuple[str, ...] = ("or", "and", "majority")
-
-_SegmenterOutput = tuple[np.ndarray, np.ndarray | None, list[SegmentInfo] | None, list]
 
 
 class EnsembleSegmenter(Segmenter):
@@ -43,9 +41,14 @@ class EnsembleSegmenter(Segmenter):
         self.method = method
 
     def segment(self, img_rgb, target_label="sidewalk", *, device=None):
-        outputs = [_normalise(m.segment(img_rgb, target_label)) for m in self.members]
+        outputs = [
+            SegmentationOutput.coerce(
+                member.segment(img_rgb, target_label), source=type(member).__name__
+            )
+            for member in self.members
+        ]
 
-        fused = logical_fuse([out[0] for out in outputs], method=self.method).astype(bool)
+        fused = logical_fuse([out.mask for out in outputs], method=self.method).astype(bool)
 
         seg_map, seg_info = _first_panoptic(outputs, fused.shape)
 
@@ -53,22 +56,11 @@ class EnsembleSegmenter(Segmenter):
         # and ignores this list, so only bother when there is none.
         obstacles = [] if seg_map is not None else _merge_obstacles(outputs, fused)
 
-        return fused, seg_map, seg_info, obstacles
-
-
-def _normalise(out: Sequence) -> _SegmenterOutput:
-    """Accept both the 3-tuple and 4-tuple shapes back-ends return."""
-    if len(out) == 3:
-        mask, seg_map, seg_info = out
-        return mask, seg_map, seg_info, []
-    if len(out) == 4:
-        mask, seg_map, seg_info, obstacles = out
-        return mask, seg_map, seg_info, list(obstacles or [])
-    raise TypeError(f"Segmenter returned {len(out)} values; expected 3 or 4")
+        return SegmentationOutput(fused, seg_map, seg_info, obstacles)
 
 
 def _first_panoptic(
-    outputs: Sequence[_SegmenterOutput],
+    outputs: Sequence[SegmentationOutput],
     shape: tuple[int, ...],
 ) -> tuple[np.ndarray | None, list[SegmentInfo] | None]:
     """
@@ -78,17 +70,17 @@ def _first_panoptic(
     segment ids would no longer line up with the fused mask; skip it rather
     than emit a misaligned map.
     """
-    for _, seg_map, seg_info, _ in outputs:
-        if seg_map is None or seg_info is None:
+    for out in outputs:
+        if out.seg_map is None or out.seg_info is None:
             continue
-        if tuple(np.shape(seg_map)[:2]) != tuple(shape):
+        if tuple(np.shape(out.seg_map)[:2]) != tuple(shape):
             continue
-        return seg_map, seg_info
+        return out.seg_map, out.seg_info
     return None, None
 
 
 def _merge_obstacles(
-    outputs: Sequence[_SegmenterOutput],
+    outputs: Sequence[SegmentationOutput],
     fused: np.ndarray,
 ) -> list[tuple[str, np.ndarray]]:
     """
@@ -97,8 +89,8 @@ def _merge_obstacles(
     report the same physical object, so counts from this path are upper bounds.
     """
     merged: list[tuple[str, np.ndarray]] = []
-    for _, _, _, obstacles in outputs:
-        for label, mask in obstacles:
+    for out in outputs:
+        for label, mask in out.obstacles:
             m = np.asarray(mask).astype(bool)
             if m.shape != fused.shape:
                 continue

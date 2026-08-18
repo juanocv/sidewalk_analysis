@@ -7,7 +7,7 @@ from PIL import Image
 
 from sidewalk_ai.processing.refinement import shave_above_top_envelope
 
-from .base import Segmenter
+from .base import Segmenter, SegmentationOutput
 
 
 class DeepLabSegmenter(Segmenter):
@@ -117,7 +117,7 @@ class DeepLabSegmenter(Segmenter):
             class_name = self.id2label.get(class_id, f"class_{class_id}")
             seg_info.append((int(class_id), class_name))
 
-        return mask, pred, seg_info, obstacles
+        return SegmentationOutput(mask, pred, seg_info, obstacles)
 
     def get_class_labels(self):
         """Get class labels mapping for DeepLab"""
