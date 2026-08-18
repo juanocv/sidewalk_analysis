@@ -135,6 +135,7 @@ def to_metric_depth(
     fov_deg: float = 90.0,
     fallback_scale: float | None = None,
     force_fallback: bool = False,
+    crop_bottom_px: int = 0,
     seed: int | None = 0,
 ) -> tuple[np.ndarray, float | None, str]:
     """
@@ -151,7 +152,9 @@ def to_metric_depth(
     map is returned untouched and must not be trusted as metric).
     """
     depth = np.asarray(depth, dtype=np.float32)
-    fx, fy, cx, cy = _intrinsics_after_crop(depth.shape[1], fov_deg)
+    fx, fy, cx, cy = _intrinsics_after_crop(
+        depth.shape[1], depth.shape[0], fov_deg, crop_bottom_px=crop_bottom_px
+    )
 
     alpha: float | None = None
     source = "none"
@@ -191,17 +194,28 @@ def _ground_intersection(u, v, fx, fy, cx, cy, pitch_deg=0.0, H_cam=CAM_HEIGHT_M
 
 
 def _intrinsics_after_crop(
-    W: int = 600, fov_deg: float = 90.0
+    W: int,
+    H: int,
+    fov_deg: float = 90.0,
+    crop_bottom_px: int = 0,
 ) -> tuple[float, float, float, float]:
     """
-    Returns fx, fy, cx, cy *in cropped coordinates* but referenced to the
-    original optical centre (cy = 200 px).
+    Pinhole intrinsics for a frame of *W*x*H*, in the coordinates of that frame.
+
+    ``cy`` is the principal-point row of the frame *as captured*. Cropping the
+    bottom does not move it, because the rows above keep their indices, so a
+    caller that trimmed the Google logo strip passes how much it removed and
+    still gets the original centre back.
+
+    This used to hardcode ``cy = 200``, the half-height of a 600x400 Street View
+    frame. Every other capture size -- ``ImageRequest.size`` is configurable --
+    placed the horizon on the wrong row, and the horizon is what the width band
+    is measured against.
     """
     fx = W / (2 * np.tan(np.radians(fov_deg / 2)))
     fy = fx
     cx = W / 2
-    cy_orig = ORIG_SIZE[1] / 2  # 200.0
-    cy = cy_orig  # same row survives the crop
+    cy = (H + crop_bottom_px) / 2
     return fx, fy, cx, cy
 
 
@@ -600,6 +614,7 @@ def compute_width(
     use_data_driven_margin: bool = True,
     divergence_pct: float | None = 0.25,  # None desliga a troca depth→geom
     bottom_ignore_px: int = 20,  # ignora a faixa com a logo
+    crop_bottom_px: int = 0,  # linhas ja removidas do rodape antes desta chamada
     seed: int | None = 0,
     # debug helpers
     debug: bool = False,
@@ -652,7 +667,7 @@ def compute_width(
     depth_good_rows = 0
 
     # 0) intrinsics and horizon
-    fx, fy, cx, cy = _intrinsics_after_crop(W, fov_deg)
+    fx, fy, cx, cy = _intrinsics_after_crop(W, H, fov_deg, crop_bottom_px=crop_bottom_px)
     v_h = cy - fy * np.tan(np.radians(pitch_deg))
 
     _swai_log(

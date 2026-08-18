@@ -7,7 +7,39 @@ from PIL import Image
 
 from sidewalk_ai.processing.refinement import shave_above_top_envelope
 
-from .base import Segmenter
+from .base import Segmenter, SegmentationOutput
+
+# What counts as an obstacle depends on the label space, and Cityscapes' 19
+# coarse classes are not ADE20K's 150. Spelling the set out here makes the
+# choice reviewable instead of leaving it to whichever ADE20K names happen to
+# coincide; these are exactly the classes the shared default already ignored,
+# so behaviour is unchanged.
+#
+# Two judgement calls are worth revisiting against ground truth:
+#   * `terrain` is Cityscapes for grass/soil beside the path. ADE20K splits the
+#     same ground into `grass`, which is *not* ignored -- which is most of why
+#     OneFormer reports obstacles on frames where DeepLab does not.
+#   * `car` is ignored, yet a car parked on the sidewalk is a real barrier. It
+#     touched the sidewalk in 4 of 10 sampled frames, though touching the kerb
+#     is not the same as blocking the path.
+CITYSCAPES_IGNORE_LABELS = frozenset(
+    {
+        "road",
+        "building",
+        "wall",
+        "fence",
+        "sky",
+        "terrain",
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "train",
+        "motorcycle",
+        "bicycle",
+    }
+)
+CITYSCAPES_SIDEWALK_LABELS = frozenset({"sidewalk"})
 
 
 class DeepLabSegmenter(Segmenter):
@@ -117,7 +149,14 @@ class DeepLabSegmenter(Segmenter):
             class_name = self.id2label.get(class_id, f"class_{class_id}")
             seg_info.append((int(class_id), class_name))
 
-        return mask, pred, seg_info, obstacles
+        return SegmentationOutput(
+            mask,
+            pred,
+            seg_info,
+            obstacles,
+            ignore_labels=CITYSCAPES_IGNORE_LABELS,
+            sidewalk_labels=CITYSCAPES_SIDEWALK_LABELS,
+        )
 
     def get_class_labels(self):
         """Get class labels mapping for DeepLab"""

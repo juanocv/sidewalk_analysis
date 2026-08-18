@@ -95,8 +95,12 @@ def read_rgb(
     # ─── assure channel order + optional crop ─────────────────────────────
     rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)  # idempotent if already RGB
 
-    if crop_bar and rgb.shape[0] > _cfg.google_bar_height_px:
-        rgb = rgb[: -_cfg.google_bar_height_px, :]
+    # The height guard matters: with the default bar height of 0, `rgb[:-0]` is
+    # `rgb[:0]`, so asking for the crop returned an empty image instead of an
+    # uncropped one.
+    bar = int(_cfg.google_bar_height_px)
+    if crop_bar and bar > 0 and rgb.shape[0] > bar:
+        rgb = rgb[:-bar, :]
 
     return rgb
 

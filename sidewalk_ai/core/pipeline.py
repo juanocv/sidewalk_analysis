@@ -22,7 +22,7 @@ from sidewalk_ai.processing.geometry import (
     to_metric_depth,
 )
 from sidewalk_ai.processing.fusion import logical_fuse
-from sidewalk_ai.models.base import Segmenter
+from sidewalk_ai.models.base import SegmentationOutput, Segmenter
 from sidewalk_ai.log import debug_event, get_logger
 
 logger = get_logger(__name__)
@@ -413,10 +413,16 @@ class SidewalkPipeline:
                 req = ImageRequest(lat, lon, heading=heading, pitch=pitch, fov=fov)
                 # t0 = time.time()
                 img_path = self.sv.fetch(req)
-                img_rgb = read_rgb(img_path)
+                # crop_bar=False regardless of SWAI_IMG_AUTO_CROP_GOOGLE_LOGO: this pipeline
+                # handles the logo strip by ignoring rows, not removing them (bottom_ignore_px
+                # for width, NaN for depth). Letting read_rgb crop as well would take the
+                # strip off three times over and shift every row against the depth map.
+                img_rgb = read_rgb(img_path, crop_bar=False)
 
-                out = self.segmenter.segment(img_rgb)
-                sidewalk_mask = out[0]
+                out = SegmentationOutput.coerce(
+                    self.segmenter.segment(img_rgb), source=type(self.segmenter).__name__
+                )
+                sidewalk_mask = out.mask
                 if isinstance(sidewalk_mask, Iterable) and not isinstance(
                     sidewalk_mask, np.ndarray
                 ):
@@ -563,24 +569,21 @@ class SidewalkPipeline:
             initial_time = self.initial_time
         if initial_time is None:
             initial_time = time.time()
-        img_rgb = read_rgb(img_path)
+        # crop_bar=False regardless of SWAI_IMG_AUTO_CROP_GOOGLE_LOGO: this pipeline
+        # handles the logo strip by ignoring rows, not removing them (bottom_ignore_px
+        # for width, NaN for depth). Letting read_rgb crop as well would take the
+        # strip off three times over and shift every row against the depth map.
+        img_rgb = read_rgb(img_path, crop_bar=False)
 
         # -------- Mask Segmentation -------- #
-        obstacles = []
-        out = self.segmenter.segment(img_rgb)
-        if len(out) == 3:
-            sidewalk_mask, seg_map, seg_info = out  # detectron2, oneformer
-        elif len(out) == 4:
-            sidewalk_mask, seg_map, seg_info, obstacles = out  # deeplab, ensemble
-        else:
-            # Falling through used to leave every name below unbound, so the
-            # real failure surfaced 20 lines later as a confusing NameError.
-            raise TypeError(
-                f"{type(self.segmenter).__name__}.segment() returned {len(out)} values; "
-                "expected (mask, seg_map, seg_info) or (mask, seg_map, seg_info, obstacles)"
-            )
+        out = SegmentationOutput.coerce(
+            self.segmenter.segment(img_rgb), source=type(self.segmenter).__name__
+        )
+        sidewalk_mask, seg_map, seg_info = out.mask, out.seg_map, out.seg_info
+        obstacles = out.obstacles
 
-        # Some back-ends (ensemble) may return a tuple of masks
+        # A back-end may still hand back several candidate masks to fuse here
+        # rather than fusing them itself, as EnsembleSegmenter does.
         if isinstance(sidewalk_mask, Iterable) and not isinstance(sidewalk_mask, np.ndarray):
             sidewalk_mask = logical_fuse(list(sidewalk_mask), method=self.fuse_method or "or")
 
@@ -603,7 +606,15 @@ class SidewalkPipeline:
         # Sempre derive obstáculos pela BASE (contato com a calçada) a partir
         # do mapa panóptico – robusto contra copas coladas:
         if seg_map is not None and seg_info is not None:
-            obstacles = extract_obstacles(seg_map, seg_info, refined_mask)
+            # The vocabulary travels with the map: a back-end that declares
+            # one for its own label space overrides the ADE20K defaults.
+            obstacles = extract_obstacles(
+                seg_map,
+                seg_info,
+                refined_mask,
+                ignore_labels=out.ignore_labels,
+                sidewalk_labels=out.sidewalk_labels,
+            )
         # caso extremo: sem panoptic disponível, mantém os do segmenter
         logger.info("Obstacle extraction took %.4f seconds", time.time() - initial_time)
 

@@ -17,7 +17,7 @@ PITCH_DEG = -10.0
 
 def _ground_truth_depth() -> tuple[np.ndarray, np.ndarray]:
     """A sidewalk lying on the ground plane, with its exact metric depth map."""
-    fx, fy, cx, cy = _intrinsics_after_crop(WIDTH, FOV_DEG)
+    fx, fy, cx, cy = _intrinsics_after_crop(WIDTH, HEIGHT, FOV_DEG)
 
     mask = np.zeros((HEIGHT, WIDTH), bool)
     mask[300:400, 80:520] = True
@@ -29,7 +29,7 @@ def _ground_truth_depth() -> tuple[np.ndarray, np.ndarray]:
 
 
 def _scale_args():
-    fx, fy, cx, cy = _intrinsics_after_crop(WIDTH, FOV_DEG)
+    fx, fy, cx, cy = _intrinsics_after_crop(WIDTH, HEIGHT, FOV_DEG)
     return fx, fy, cx, cy
 
 

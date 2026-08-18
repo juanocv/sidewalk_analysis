@@ -8,7 +8,7 @@ from detectron2.data import MetadataCatalog
 
 from sidewalk_ai.processing.refinement import shave_above_top_envelope
 
-from .base import Segmenter, SegmentInfo
+from .base import SegmentationOutput, Segmenter, SegmentInfo
 
 
 class Detectron2Segmenter(Segmenter):
@@ -64,7 +64,7 @@ class Detectron2Segmenter(Segmenter):
             min_cols=30,
         ).astype(bool)
 
-        return mask, seg_map, seg_info
+        return SegmentationOutput(mask, seg_map, seg_info)
 
     # ------------------------------------------------------------------ #
     # Convenience ctor – mirrors old  initialize_model(model_path)
